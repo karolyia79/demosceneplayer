@@ -7,7 +7,8 @@
 
 An old-school demoscene visualizer and MP3 music player written in pure **Win64 x86-64 Assembly (NASM)** with zero external libraries and no C runtime. The entire 3D scene, 32-channel LED spectrum analyzer, sine-wave scroller, and interactive UI are rendered in real time by a single embedded **GLSL 1.20 fragment shader**.
 
-![Chrome Torus Preview](screenshot.png)
+![Chrome Torus Preview](screenshot.jpg)
+
 
 ## Features
 
