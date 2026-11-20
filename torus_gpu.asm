@@ -1,21 +1,23 @@
 ; ============================================================================
-; Win64 Pure x86-64 Assembly + OpenGL GLSL Raymarcher Demoscene Music Player
+; Chrome Torus - Modern Win64 Pure x86-64 Assembly + GLSL Demoscene Engine
 ; Features:
-;   - Fast single-pass raymarcher with bounding-sphere early-out & dFdx/dFdy CA
-;   - 32-channel, 28-segment LED demoscene VU meter / spectrum in background
-;   - Macro-warped, bending & undulating chrome torus SDF (space warping)
-;   - Auto-advances to the next track when the current track finishes
-;   - Top player bar with Prev, right-pointing Play/Pause, Next,
-;     interactive Seek bar (gyorstekero), and Speaker Mute + Volume slider
-;   - HUD hidden by default ([H] toggles 5 visual sliders)
-;   - Crisp 5x7 bitmap font in GLSL 1.20 (packed vec4 uniform arrays)
+;   - Volumetric Raymarched God Rays & Shadowed Light Scattering
+;   - Real-time Raymarched Mirror Floor with Bass Shockwave Ripples ([G])
+;   - Kinetic Outer Orbiting Shard Ring ([C])
+;   - Modern PBR-style Materials: Chrome / Obsidian Magma / Iridescent Glass ([W])
+;   - 5-shape SDF Morphing: Torus, Plasma, Menger, Rings, Metaballs ([0-5])
+;   - Beat-Synced Camera Kick Punch & Digital Micro-Glitch ([X])
+;   - Real-time WASAPI Loopback 32-band Goertzel FFT + 64k ASM Synth ([S])
 ; ============================================================================
 
 [BITS 64]
 default rel
 
 %define MAX_TRACKS 32
-%define MAX_SCROLL 192      ; 48 * vec4
+%define MAX_SCROLL 192
+%define FFT_N      256
+%define SYNTH_SAMPLES 4096
+%define SYNTH_BYTES   (SYNTH_SAMPLES * 2)
 
 extern GetModuleHandleA
 extern RegisterClassExA
@@ -31,28 +33,59 @@ extern ChoosePixelFormat
 extern SetPixelFormat
 extern SwapBuffers
 extern GetClientRect
+extern GetWindowRect
+extern GetWindowLongPtrA
+extern SetWindowLongPtrA
+extern SetWindowPos
+extern MonitorFromWindow
+extern GetMonitorInfoA
 extern MessageBoxA
 extern ExitProcess
 extern FindFirstFileA
 extern FindNextFileA
 extern FindClose
+extern GetFullPathNameA
 extern lstrcpyA
 extern lstrcatA
+extern LoadLibraryA
+extern GetProcAddress
+extern QueryPerformanceFrequency
+extern QueryPerformanceCounter
+extern VirtualAlloc
+extern VirtualFree
+extern CreateFileA
+extern WriteFile
+extern CloseHandle
 
 extern wglCreateContext
 extern wglMakeCurrent
 extern wglGetProcAddress
 extern glViewport
 extern glRectf
+extern glReadPixels
+extern glPixelStorei
 
 extern mciSendStringA
 extern mciGetErrorStringA
+extern waveOutOpen
+extern waveOutPrepareHeader
+extern waveOutWrite
+extern waveOutReset
+extern waveOutClose
 
 section .data
-    class_name  db "DemoTorus64kSOTA", 0
-    win_title   db "x86-64 ASM Demoscene Player | [N/P] Track  [SPACE] Pause  [H] HUD  [M] Mute  [ESC] Exit", 0
+    class_name  db "DemoTorus64kUltra", 0
+    win_title   db "K79 x86-64 Modern Demo | [0-5] Morph [C] KineticRing [W] Mat [X] Glitch [G] Floor [S] Synth [F11] Full [H] HUD", 0
     err_title   db "GLSL Shader Compile Error", 0
     mci_err_ttl db "MCI Audio Error", 0
+
+    dll_ole32   db "ole32.dll", 0
+    dll_shell32 db "shell32.dll", 0
+    fn_CoInitializeEx    db "CoInitializeEx", 0
+    fn_CoCreateInstance  db "CoCreateInstance", 0
+    fn_DragAcceptFiles   db "DragAcceptFiles", 0
+    fn_DragQueryFileA    db "DragQueryFileA", 0
+    fn_DragFinish        db "DragFinish", 0
 
     music_pattern   db "music\*.mp3", 0
     music_prefix    db "music\", 0
@@ -70,7 +103,26 @@ section .data
     vol_cmd_buf     db "setaudio bgm volume to "
     vol_num_buf     db "800", 0, 0, 0, 0, 0
 
-    ; 8 demoscene zene kulcsai + pontos metaadatok
+    ; WASAPI COM GUIDs
+    align 4
+    CLSID_MMDeviceEnumerator:
+        dd 0xBCDE0395
+        dw 0xE52F, 0x467C
+        db 0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E
+    IID_IMMDeviceEnumerator:
+        dd 0xA95664D2
+        dw 0x9614, 0x4F35
+        db 0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6
+    IID_IAudioClient:
+        dd 0x1CB9AD4C
+        dw 0xDBFA, 0x4C32
+        db 0xB1, 0x78, 0xC2, 0xF5, 0x68, 0xA7, 0x03, 0xB2
+    IID_IAudioCaptureClient:
+        dd 0xC8ADBD64
+        dw 0xE71E, 0x48A0
+        db 0xA4, 0xDE, 0x18, 0x5C, 0x39, 0x5C, 0xD3, 0x17
+
+    ; Built-in demoscene track metadata
     meta_cyber      db "cyberride", 0
     info_cyber      db "TRACK: CYBERRIDE // DEMO: EXTENSION // HW: AMIGA // AUTHOR: JESTER (SANITY) // SCENE: PYGMY PROJECTS // YEAR: 1993", 0
     tag_cyber       db "CYBERRIDE", 0
@@ -104,9 +156,9 @@ section .data
     tag_sota        db "STATE OF THE ART", 0
 
     lbl_track       db "TRACK: ", 0
-    lbl_empty       db "NO MP3 IN MUSIC FOLDER // ADD MP3 TO MUSIC SUBDIR // DEMO: CHROME TORUS // HW: WIN64 X86-64 // AUTHOR: KAROLYIA79 // SCENE: DEMOSCENE // YEAR: 2026", 0
     lbl_tail        db " // DEMO: DEMOSCENE ARCHIVE // HW: RETRO & PC // SCENE: DEMOSCENE", 0
-    tag_empty       db "NO MP3", 0
+    info_synth      db "MODE: 64K PROCEDURAL ASM SYNTH // 5-VOICE CHIP & ACID GROOVE (138 BPM) // VOLUMETRIC RAYMARCHER // PRESS [S] FOR MP3", 0
+    tag_synth       db "64K ASM SYNTH", 0
 
     fn_glCreateShader       db "glCreateShader", 0
     fn_glShaderSource       db "glShaderSource", 0
@@ -130,6 +182,9 @@ section .data
     u_sliders_name    db "u_sliders", 0
     u_extra_name      db "u_extra", 0
     u_player_name     db "u_player", 0
+    u_fx_name         db "u_fx", 0
+    u_demo_name       db "u_demo", 0
+    u_bands_name      db "u_bands", 0
     u_scroll_name     db "u_scroll", 0
     u_scroll_len_name db "u_scroll_len", 0
     u_top_name        db "u_top", 0
@@ -157,19 +212,29 @@ section .data
         db 8
         db 0,0,0,0,0,0
 
+    ; PCM 44100 Hz 16-bit Mono WAVEFORMATEX for 64k Procedural Synth
+    align 4
+    synth_wfx:
+        dw 1                ; WAVE_FORMAT_PCM
+        dw 1                ; nChannels = 1
+        dd 44100            ; nSamplesPerSec
+        dd 88200            ; nAvgBytesPerSec
+        dw 2                ; nBlockAlign
+        dw 16               ; wBitsPerSample
+        dw 0                ; cbSize
+
     time        dd 0.0
     dt_step     dd 0.016
     rot_phase   dd 0.0
     mag_phase   dd 0.0
 
-    ; HUD sliderek (5 db)
-    slider0     dd 0.21         ; 0. ROT SPD
+    ; HUD sliders (5)
+    slider0     dd 0.22         ; 0. ROT SPD
     slider1     dd 0.18         ; 1. AMBIENT
     slider2     dd 0.34         ; 2. MAG SPD
-    slider3     dd 0.42         ; 3. MAG PWR
+    slider3     dd 0.44         ; 3. MAG PWR
     slider4     dd 0.65         ; 4. SPIKES
 
-    ; Player sav hangero (kulon a felso savban)
     vol_level   dd 0.80
     saved_vol   dd 0.80
     muted_flag  dd 0
@@ -178,17 +243,59 @@ section .data
     max_rot_spd dd 2.0
     max_mag_spd dd 5.0
 
-    hud_visible dd 0.0          ; Alapbol rejtve ([H] gomb kapcsolja)
-    drag_mode   dd 0            ; 0=none, 1=HUD slider, 2=seek bar, 3=volume bar
+    hud_visible dd 0.0
+    drag_mode   dd 0
     active_sldr dd -1
     paused_flag dd 0
 
+    ; Engine FX state
+    morph_mode  dd 1            ; 0=Auto-Morph, 1=Torus, 2=Plasma, 3=Menger, 4=Rings, 5=Metaballs
+    morph_val   dd 0.0          ; 0.0 .. 4.0
+    grid_on     dd 1.0          ; 1.0 = Raymarched Reflective Ripple Floor ON ([G])
+    copper_on   dd 1.0          ; 1.0 = Kinetic Outer Shard Ring ON ([C])
+    holo_mode   dd 0            ; 0=Liquid Chrome, 1=Obsidian Magma, 2=Iridescent Glass ([W])
+    holo_mode_f dd 0.0
+    glitch_on   dd 1.0          ; 1.0 = Beat Kick Punch & Digital Micro-Glitch ON ([X])
+    flash_env   dd 0.0          ; F12 screenshot flash
+    shot_idx    dd 1
+    is_fullscr  dd 0
+    synth_mode  dd 0            ; 1 = 64k procedural synth active
+    dropped_flg dd 0
+
     c_neg1      dd -1.0
     c_pos1      dd 1.0
+    c_two_f     dd 2.0
     c_zero      dd 0.0
     c_1000      dd 1000.0
     c_space_f   dd 32.0
+    c_max_dt    dd 0.10
+    c_fps_iv    dd 0.25
+    c_flash_dec dd 4.0
     bass_env    dd 0.0
+    high_env    dd 0.0
+    fps_val_f   dd 60.0
+    fps_accum   dd 0.0
+    fps_frames  dd 0
+
+    ; Goertzel & Synth constants
+    c_f_start   dd 45.0
+    c_f_step    dd 1.2035
+    c_g_start   dd 0.032
+    c_g_step    dd 1.046
+    c_two       dd 2.0
+    c_half      dd 0.5
+    c_atk       dd 0.65
+    c_dec       dd 0.84
+    c_bass_mul  dd 0.34
+    c_high_mul  dd 0.28
+    c_i16_scale dd 0.000030517578125 ; 1.0 / 32768.0
+    c_synth_out dd 24000.0
+    c_44100     dd 44100.0
+
+    ; Chord frequencies for 64k Synth: D2, Bb1, C2, A1 (Hz)
+    chord_root  dd 73.416, 58.270, 65.406, 55.000
+    ; Arpeggio ratios
+    arp_ratios  dd 2.0, 2.3784, 2.9966, 4.0
 
     track_count  dd 0
     cur_track    dd 0
@@ -197,22 +304,70 @@ section .data
     scroll_len   dd 0
     top_len      dd 0
 
+    ; WASAPI state
+    wasapi_ok    dd 0
+    wfx_rate     dd 48000
+    wfx_ch       dd 2
+    wfx_bits     dd 32
+    wfx_is_float dd 1
+    fft_wr_idx   dd 0
+
+    ; Synth state
+    hWaveOut     dq 0
+    synth_smp_i  dd 0
+    synth_lp_y   dd 0.0
+    synth_prev_n dd 0.0
+    lfsr_state   dd 0xACE1
+
     align 8
     hInstance    dq 0
     hwnd         dq 0
     hdc          dq 0
     hglrc        dq 0
     hFind        dq 0
-    msg          times 48 db 0
-    rect         times 4 dd 0
-    find_data    times 320 db 0
-    mci_cmd_buf  times 320 db 0
-    mci_ret_buf  times 64 db 0
-    mci_err_buf  times 256 db 0
-    scroller_txt times 256 db 0
-    top_txt      times 64 db 0
-    u_scroll_arr times MAX_SCROLL dd 32.0
-    u_top_arr    times 32 dd 32.0
+    qpc_freq     dq 1
+    qpc_last     dq 0
+    qpc_now      dq 0
+    saved_style  dq 0
+    saved_rect   times 4 dd 0
+    mon_info     times 10 dd 0
+
+    pCoInitializeEx   dq 0
+    pCoCreateInstance dq 0
+    pDragAcceptFiles  dq 0
+    pDragQueryFileA   dq 0
+    pDragFinish       dq 0
+
+    pEnumerator    dq 0
+    pDevice        dq 0
+    pAudioClient   dq 0
+    pCaptureClient dq 0
+    pwfx           dq 0
+
+    msg           times 48 db 0
+    rect          times 4 dd 0
+    find_data     times 320 db 0
+    dropped_path  times 260 db 0
+    rel_path_buf  times 260 db 0
+    full_path_buf times 260 db 0
+    shot_name     times 32 db 0
+    mci_cmd_buf   times 640 db 0
+    mci_ret_buf   times 64 db 0
+    mci_err_buf   times 256 db 0
+    scroller_txt  times 256 db 0
+    top_txt       times 64 db 0
+    u_scroll_arr  times MAX_SCROLL dd 32.0
+    u_top_arr     times 32 dd 32.0
+    u_bands       times 32 dd 0.0
+    goertzel_c    times 32 dd 0.0
+    goertzel_g    times 32 dd 0.0
+    fft_ring      times 512 dd 0.0
+
+    align 8
+    whdr0        times 48 db 0
+    whdr1        times 48 db 0
+    synth_buf0   times SYNTH_BYTES db 0
+    synth_buf1   times SYNTH_BYTES db 0
 
     tracks_buf   times (MAX_TRACKS * 128) db 0
 
@@ -242,6 +397,9 @@ section .data
     u_sliders_loc    dd 0
     u_extra_loc      dd 0
     u_player_loc     dd 0
+    u_fx_loc         dd 0
+    u_demo_loc       dd 0
+    u_bands_loc      dd 0
     u_scroll_loc     dd 0
     u_scroll_len_loc dd 0
     u_top_loc        dd 0
@@ -262,11 +420,25 @@ section .data
         db "uniform vec4 u_sliders;", 10
         db "uniform vec4 u_extra;", 10
         db "uniform vec4 u_player;", 10
+        db "uniform vec4 u_fx;", 10
+        db "uniform vec4 u_demo;", 10
+        db "uniform vec4 u_bands[8];", 10
         db "uniform vec4 u_scroll[48];", 10
         db "uniform int u_scroll_len;", 10
         db "uniform vec4 u_top[8];", 10
         db "uniform int u_top_len;", 10
         db "mat2 rot(float a){float s=sin(a),c=cos(a);return mat2(c,-s,s,c);}", 10
+        db "float smin(float a, float b, float k){", 10
+        db "  float h=clamp(0.5+0.5*(b-a)/k, 0.0, 1.0);", 10
+        db "  return mix(b, a, h)-k*h*(1.0-h);", 10
+        db "}", 10
+        db "float getBand(int idx){", 10
+        db "  int vIdx=idx/4;", 10
+        db "  int cIdx=idx-vIdx*4;", 10
+        db "  vec4 v=vec4(0.0);", 10
+        db "  for(int i=0;i<8;i++){ if(i==vIdx){ v=u_bands[i]; break; } }", 10
+        db "  return (cIdx==0)?v.x:((cIdx==1)?v.y:((cIdx==2)?v.z:v.w));", 10
+        db "}", 10
         db "float gyroid(vec3 p, float f, float ph){", 10
         db "  vec3 a=p*f+ph, b=p*f-ph;", 10
         db "  return sin(a.x)*cos(b.y)+sin(a.y)*cos(b.z)+sin(a.z)*cos(b.x);", 10
@@ -280,14 +452,14 @@ section .data
         db "  return (s1+s2)*u_extra.y*u_extra.z;", 10
         db "}", 10
         db "vec3 magPos(float th, float a){", 10
-        db "  vec3 p=vec3(1.22*(1.0-cos(th)),1.22*sin(th),0.0);", 10
+        db "  vec3 p=vec3(1.25*(1.0-cos(th)),1.25*sin(th),0.0);", 10
         db "  mat2 rA=rot(-a);", 10
         db "  p.yz*=rA; p.xz*=rA;", 10
         db "  return p;", 10
         db "}", 10
         db "vec3 cubePos(float th, float a){", 10
         db "  float oppTh=th+3.14159265;", 10
-        db "  vec3 p=vec3(1.22*(1.0-cos(oppTh)), -1.22*sin(oppTh), 0.42);", 10
+        db "  vec3 p=vec3(1.25*(1.0-cos(oppTh)), -1.25*sin(oppTh), 0.42);", 10
         db "  mat2 rA=rot(-a);", 10
         db "  p.yz*=rA; p.xz*=rA;", 10
         db "  return p;", 10
@@ -296,6 +468,7 @@ section .data
         db "  vec3 q=abs(p)-b;", 10
         db "  return length(max(q,0.0))+min(max(q.x,max(q.y,q.z)),0.0)-r;", 10
         db "}", 10
+        ; --- Shape 0: Warped Chrome Torus ---
         db "float mapTorus(vec3 p){", 10
         db "  float a=u_phases.x;", 10
         db "  float bass=u_extra.y;", 10
@@ -317,15 +490,98 @@ section .data
         db "    float orgMix=clamp(1.0 - sp*3.2, 0.22, 1.0);", 10
         db "    float wp=u_time*(1.55 + 0.45*orgMix);", 10
         db "    vec3 w=p+(0.24+0.18*orgMix)*vec3(sin(p.y*3.4+wp),cos(p.z*3.4-wp),sin(p.x*3.4+wp));", 10
-        db "    float a1=(0.015+0.006*sin(u_time*1.13))*orgMix;", 10
-        db "    float a2=(0.007+0.003*cos(u_time*1.89))*orgMix;", 10
-        db "    float a3=(0.0035*sin(u_time*2.7))*orgMix;", 10
-        db "    d+=gyroid(w,5.8,u_time*1.9)*a1;", 10
-        db "    d+=gyroid(w.yzx,12.7,-u_time*2.75)*a2;", 10
-        db "    d+=gyroid(w.zxy,23.1,u_time*3.4)*a3;", 10
+        db "    d+=gyroid(w,5.8,u_time*1.9)*(0.015+0.006*sin(u_time*1.13))*orgMix;", 10
+        db "    d+=gyroid(w.yzx,12.7,-u_time*2.75)*(0.007+0.003*cos(u_time*1.89))*orgMix;", 10
         db "    d-=sp*0.095;", 10
         db "  }", 10
         db "  return d;", 10
+        db "}", 10
+        ; --- Shape 1: Spiky Ferrofluid Plasma Star ---
+        db "float mapPlasma(vec3 p){", 10
+        db "  float a=u_phases.x;", 10
+        db "  float bass=u_extra.y;", 10
+        db "  mat2 rA=rot(a*1.1);", 10
+        db "  p.xz*=rA; p.xy*=rA;", 10
+        db "  float r=1.08+0.12*bass;", 10
+        db "  float d=length(p)-r;", 10
+        db "  if(d<0.45){", 10
+        db "    float g1=gyroid(p, 4.2, u_time*2.1);", 10
+        db "    float g2=gyroid(p.yzx, 8.5, -u_time*3.0);", 10
+        db "    float sp=spikeField(p*1.15);", 10
+        db "    d+=g1*(0.08+0.06*bass)+g2*0.035-sp*0.18;", 10
+        db "  }", 10
+        db "  return d;", 10
+        db "}", 10
+        ; --- Shape 2: Iterated Menger Fractal Sponge ---
+        db "float mapMenger(vec3 p){", 10
+        db "  float a=u_phases.x;", 10
+        db "  float bass=u_extra.y;", 10
+        db "  mat2 rA=rot(a*0.85);", 10
+        db "  p.xz*=rA; p.yz*=rot(a*0.65);", 10
+        db "  float sc=1.0+0.08*bass;", 10
+        db "  p/=sc;", 10
+        db "  float d=sdRoundBox(p, vec3(0.95), 0.03);", 10
+        db "  float s=1.0;", 10
+        db "  for(int m=0;m<3;m++){", 10
+        db "    vec3 a3=mod(p*s, 2.0)-1.0;", 10
+        db "    s*=3.0;", 10
+        db "    vec3 r=abs(1.0-3.0*abs(a3));", 10
+        db "    float da=max(r.x,r.y);", 10
+        db "    float db=max(r.y,r.z);", 10
+        db "    float dc=max(r.z,r.x);", 10
+        db "    float c=(min(da,min(db,dc))-1.0)/s;", 10
+        db "    d=max(d, c);", 10
+        db "  }", 10
+        db "  return d*sc;", 10
+        db "}", 10
+        ; --- Shape 3: Braided Interlocking Double Rings ---
+        db "float mapRings(vec3 p){", 10
+        db "  float a=u_phases.x;", 10
+        db "  float bass=u_extra.y;", 10
+        db "  mat2 rA=rot(a);", 10
+        db "  p.xz*=rA; p.yz*=rA;", 10
+        db "  vec3 p1=p; p1.xy*=rot(0.55+0.2*sin(u_time));", 10
+        db "  vec3 p2=p; p2.yz*=rot(1.02-0.2*cos(u_time));", 10
+        db "  float rMaj=1.18+0.08*bass;", 10
+        db "  float rMin=0.26+0.04*bass;", 10
+        db "  float d1=length(vec2(length(p1.xz)-rMaj, p1.y))-rMin;", 10
+        db "  float d2=length(vec2(length(p2.xy)-rMaj, p2.z))-rMin;", 10
+        db "  float d=min(d1, d2);", 10
+        db "  if(d<0.22) d-=spikeField(p)*0.07;", 10
+        db "  return d;", 10
+        db "}", 10
+        ; --- Shape 4: Smooth Liquid Metaballs ---
+        db "float mapMetaballs(vec3 p){", 10
+        db "  float a=u_phases.x;", 10
+        db "  float bass=u_extra.y;", 10
+        db "  mat2 rA=rot(a);", 10
+        db "  p.xz*=rA; p.yz*=rA;", 10
+        db "  float d=10.0;", 10
+        db "  for(int i=0;i<6;i++){", 10
+        db "    float fi=float(i);", 10
+        db "    float t=u_time*(1.35+0.15*fi)+fi*1.0472;", 10
+        db "    vec3 bp=vec3(sin(t*1.1+fi), cos(t*0.9-fi*0.7), sin(t*1.3+fi*1.4))*(0.74+0.15*bass);", 10
+        db "    float r=0.33+0.05*sin(u_time*3.0+fi)+0.05*bass;", 10
+        db "    d=smin(d, length(p-bp)-r, 0.36);", 10
+        db "  }", 10
+        db "  return d;", 10
+        db "}", 10
+        db "float evalShape(int id, vec3 p){", 10
+        db "  if(id==0) return mapTorus(p);", 10
+        db "  if(id==1) return mapPlasma(p);", 10
+        db "  if(id==2) return mapMenger(p);", 10
+        db "  if(id==3) return mapRings(p);", 10
+        db "  return mapMetaballs(p);", 10
+        db "}", 10
+        db "float mapMainObj(vec3 p){", 10
+        db "  float mv=clamp(u_fx.x, 0.0, 4.0);", 10
+        db "  int s0=int(floor(mv));", 10
+        db "  float fr=mv-float(s0);", 10
+        db "  float d0=evalShape(s0, p);", 10
+        db "  if(fr<0.001) return d0;", 10
+        db "  int s1=(s0<4)?(s0+1):4;", 10
+        db "  float d1=evalShape(s1, p);", 10
+        db "  return mix(d0, d1, smoothstep(0.0, 1.0, fr));", 10
         db "}", 10
         db "float mapCube(vec3 p){", 10
         db "  float a=u_phases.x, th=u_phases.y;", 10
@@ -334,10 +590,26 @@ section .data
         db "  q.xy*=rot(u_time*1.3); q.yz*=rot(-u_time*0.95);", 10
         db "  return sdRoundBox(q, vec3(0.16), 0.02);", 10
         db "}", 10
-        db "float map(vec3 p){", 10
-        db "  return min(mapTorus(p), mapCube(p));", 10
+        ; --- Kinetic Outer Orbiting Shard Ring ([C]) ---
+        db "float mapKineticRing(vec3 p){", 10
+        db "  if(u_demo.x<0.5) return 99.0;", 10
+        db "  float bass=u_extra.y;", 10
+        db "  p.xy*=rot(0.32*sin(u_time*0.4));", 10
+        db "  p.xz*=rot(-u_time*0.55);", 10
+        db "  float ang=atan(p.z, p.x);", 10
+        db "  float seg=6.2831853/16.0;", 10
+        db "  float id=floor((ang+3.14159265)/seg);", 10
+        db "  float a=mod(ang+3.14159265, seg)-0.5*seg;", 10
+        db "  float rad=length(p.xz);", 10
+        db "  float rOff=2.12+0.14*sin(id*2.1+u_time*3.2)+0.18*bass*fract(sin(id*17.3)*437.5);", 10
+        db "  vec3 q=vec3(rad-rOff, p.y-0.12*cos(id*1.7-u_time*2.6), a*rad);", 10
+        db "  q.xy*=rot(id*0.4+u_time*1.4);", 10
+        db "  return sdRoundBox(q, vec3(0.045, 0.035, 0.13), 0.008);", 10
         db "}", 10
-        ; --- Gyors 4-pontos tetraeder normalvektor (6 helyett 4 map hivas) ---
+        db "float map(vec3 p){", 10
+        db "  float d=min(mapMainObj(p), mapCube(p));", 10
+        db "  return min(d, mapKineticRing(p));", 10
+        db "}", 10
         db "vec3 calcNormal(vec3 p){", 10
         db "  vec2 e=vec2(0.003,-0.003);", 10
         db "  return normalize(e.xyy*map(p+e.xyy)+e.yyx*map(p+e.yyx)+e.yxy*map(p+e.yxy)+e.xxx*map(p+e.xxx));", 10
@@ -363,15 +635,78 @@ section .data
         db "}", 10
         db "vec3 envReflect(vec3 r, vec3 lm, float magI, float bass){", 10
         db "  float hy=clamp(r.y*0.5+0.5, 0.0, 1.0);", 10
-        db "  vec3 e=mix(vec3(0.06,0.09,0.16), vec3(0.62,0.78,0.98), hy);", 10
+        db "  vec3 e=mix(vec3(0.04,0.03,0.09), vec3(0.55,0.82,1.0), hy);", 10
         db "  float band=0.5+0.5*sin(r.x*8.0+r.y*10.0+u_time*1.5);", 10
-        db "  e+=vec3(0.18,0.24,0.32)*band*band;", 10
+        db "  e+=vec3(0.18,0.24,0.34)*band*band;", 10
         db "  vec3 ldir=normalize(lm);", 10
         db "  float sun=pow(max(dot(normalize(r), ldir), 0.0), 32.0);", 10
         db "  e+=vec3(1.6,2.1,2.6)*magI*sun*(0.7+0.3*bass);", 10
         db "  return e;", 10
         db "}", 10
-        ; --- 32 csatornas, 28 szegmenses hatter LED VU-meter ---
+        ; --- Shade Surface Helper (shared between Primary Ray & Mirror Floor Reflection) ---
+        db "vec3 shadeHit(vec3 p, vec3 rd, vec3 lm, float magI, float bass, float amb){", 10
+        db "  float a=u_phases.x;", 10
+        db "  vec3 n=calcNormal(p);", 10
+        db "  float ao=calcAO(p, n);", 10
+        db "  vec3 ldir=lm-p; float dist=length(ldir); ldir/=dist;", 10
+        db "  float sh=calcSoftShadow(p+n*0.015, ldir, dist);", 10
+        db "  float atten=1.0/(1.0+0.26*dist*dist);", 10
+        db "  float diff=max(dot(n,ldir),0.0);", 10
+        db "  float spec=pow(diff,56.0);", 10
+        db "  float ndv=max(dot(n,-rd),0.0);", 10
+        db "  float fres=0.65+0.35*pow(1.0-ndv,3.0);", 10
+        db "  vec3 reflDir=reflect(rd, n);", 10
+        db "  vec3 reflCol=envReflect(reflDir, lm-p, magI, bass);", 10
+        db "  float rt=0.04, rhit=0.0;", 10
+        db "  for(int j=0;j<12;j++){", 10
+        db "    vec3 rp=p+n*0.02+reflDir*rt;", 10
+        db "    if(dot(rp,rp)>8.41) break;", 10
+        db "    float rdStep=map(rp);", 10
+        db "    if(rdStep<0.008){ rhit=1.0; break; }", 10
+        db "    rt+=clamp(rdStep*0.70, 0.03, 0.38);", 10
+        db "    if(rt>3.2) break;", 10
+        db "  }", 10
+        db "  if(rhit>0.5){", 10
+        db "    vec3 rp=p+n*0.02+reflDir*rt;", 10
+        db "    vec3 rn=calcNormal(rp);", 10
+        db "    float rdiff=max(dot(rn, normalize(lm-rp)), 0.0);", 10
+        db "    reflCol=mix(reflCol, vec3(0.85,0.92,1.0)*(0.25+0.95*rdiff)*magI, 0.72);", 10
+        db "  }", 10
+        db "  float dMain=mapMainObj(p);", 10
+        db "  float dCube=mapCube(p);", 10
+        db "  float dRing=mapKineticRing(p);", 10
+        db "  float isCube=step(dCube, dMain)*step(dCube, dRing);", 10
+        db "  float isRing=step(dRing, dMain)*step(dRing, dCube);", 10
+        db "  vec3 pr=p; mat2 rA=rot(a); pr.xz*=rA; pr.yz*=rA;", 10
+        db "  float spVal=spikeField(pr);", 10
+        db "  float orgBoost=clamp(1.0 - spVal*3.0, 0.25, 1.0);", 10
+        db "  float spGlow=clamp(spVal*5.5, 0.0, 1.0);", 10
+        db "  vec3 chromeBase=vec3(0.76,0.82,0.90);", 10
+        db "  vec3 cubeBase=vec3(0.95,0.58,0.25);", 10
+        db "  vec3 ringBase=vec3(0.22,0.82,1.0);", 10
+        db "  vec3 baseCol=mix(chromeBase, cubeBase, isCube);", 10
+        db "  baseCol=mix(baseCol, ringBase, isRing);", 10
+        db "  float reflAmt=mix(0.78*fres*(0.6+0.4*orgBoost), 0.35*fres, isCube);", 10
+        db "  vec3 c=baseCol*(amb+0.08)*ao;", 10
+        db "  c=mix(c, baseCol*reflCol, reflAmt);", 10
+        db "  c+=vec3(1.8,2.25,2.7)*magI*(diff*sh*0.55+spec*sh*1.8)*atten*(0.35+0.65*ao);", 10
+        db "  c+=(1.0-isCube)*(1.0-isRing)*vec3(0.25,0.85,1.25)*spGlow*(0.35+0.65*diff);", 10
+        db "  c+=isRing*vec3(0.15,0.75,1.0)*(0.35+0.55*bass);", 10
+        ; Modern PBR Material Switcher ([W]: 0=Liquid Chrome, 1=Obsidian Magma, 2=Iridescent Glass)
+        db "  if(u_demo.y>0.5 && u_demo.y<1.5){", 10
+        db "    float crack=smoothstep(0.32, 0.92, abs(gyroid(pr, 6.2, u_time*0.8)));", 10
+        db "    float rim=pow(1.0-ndv, 2.2);", 10
+        db "    vec3 obs=vec3(0.05,0.06,0.08)*(0.3+0.7*diff)+reflCol*0.28*fres;", 10
+        db "    vec3 lava=mix(vec3(1.0,0.18,0.03), vec3(1.0,0.85,0.25), crack)*(0.55+1.35*bass)*(1.0-crack*0.45+spGlow);", 10
+        db "    c=obs+lava*(0.35+0.65*rim)+vec3(1.0,0.45,0.15)*spec*0.55;", 10
+        db "  } else if(u_demo.y>=1.5){", 10
+        db "    vec3 irid=0.5+0.5*cos(vec3(0.0,2.1,4.2)+ndv*7.5+u_time*1.4);", 10
+        db "    float rim=pow(1.0-ndv, 1.6);", 10
+        db "    c=mix(reflCol*1.15, irid*1.45, 0.35+0.55*rim)+vec3(1.0)*spec*1.4;", 10
+        db "  }", 10
+        db "  return c;", 10
+        db "}", 10
+        ; --- Real 32-Channel, 28-Segment LED Spectrum Analyzer ---
         db "vec3 vuMeter(float sPx, float sPy){", 10
         db "  float vuX0=28.0;", 10
         db "  float vuX1=u_res.x-28.0;", 10
@@ -389,43 +724,54 @@ section .data
         db "  float segIdx=floor(segPos);", 10
         db "  float segFrac=fract(segPos);", 10
         db "  if(segFrac<0.22 || segFrac>0.84) return vec3(0.0);", 10
-        db "  float isAct=(u_player.y>0.5 && u_player.z<0.5 && u_extra.w<0.5)?1.0:0.0;", 10
-        db "  float tSec=u_player.x*0.001;", 10
+        db "  float isAct=(u_player.z<0.5 && u_extra.w<0.5)?1.0:0.0;", 10
         db "  float bass=u_extra.y;", 10
-        db "  float volScale=0.25+0.75*clamp(u_player.w,0.0,1.0);", 10
-        db "  float band=chIdx/31.0;", 10
-        db "  float subW=exp(-band*7.5);", 10
-        db "  float midW=exp(-pow((band-0.42)*3.4,2.0));", 10
-        db "  float hiW=exp(-pow((band-0.84)*4.2,2.0));", 10
-        db "  float beat1=pow(0.5+0.5*sin(tSec*14.4+chIdx*0.55),3.0);", 10
-        db "  float beat2=pow(0.5+0.5*cos(tSec*9.6-chIdx*0.85+sin(tSec*2.4)*1.5),4.0);", 10
-        db "  float arp=0.5+0.5*sin(tSec*21.6+floor(mod(tSec*7.2+chIdx*0.37,8.0))*1.3);", 10
-        db "  float hiHat=pow(0.5+0.5*sin(tSec*28.8+chIdx*1.9),7.0);", 10
-        db "  float lvl=bass*(0.88*subW+0.28*midW)+midW*(0.42*beat1+0.32*arp)+hiW*(0.52*hiHat+0.30*beat2);", 10
-        db "  lvl=clamp(lvl*volScale*isAct, 0.0, 0.98);", 10
-        db "  float peakLvl=clamp(lvl+0.07*isAct*(0.5+0.5*sin(tSec*6.0+chIdx)), 0.0, 0.99);", 10
+        db "  float lvl=clamp(getBand(int(chIdx))*isAct, 0.0, 0.98);", 10
+        db "  float peakLvl=clamp(lvl+0.07*isAct, 0.0, 0.99);", 10
         db "  float litSeg=floor(lvl*28.0);", 10
         db "  float peakSeg=floor(peakLvl*28.0);", 10
         db "  vec3 ledCol=mix(vec3(0.08,0.58,0.92), vec3(0.18,0.92,0.68), clamp(hNorm*1.6,0.0,1.0));", 10
         db "  ledCol=mix(ledCol, vec3(1.0,0.76,0.18), smoothstep(0.55,0.82,hNorm));", 10
         db "  ledCol=mix(ledCol, vec3(1.0,0.24,0.36), smoothstep(0.82,0.96,hNorm));", 10
-        db "  if(segIdx<=litSeg && isAct>0.5){", 10
+        db "  if(segIdx<=litSeg && lvl>0.01){", 10
         db "    return ledCol*(0.55+0.30*bass);", 10
         db "  }", 10
-        db "  if(abs(segIdx-peakSeg)<0.5 && isAct>0.5 && peakSeg>0.5){", 10
+        db "  if(abs(segIdx-peakSeg)<0.5 && lvl>0.03){", 10
         db "    return ledCol*0.85;", 10
         db "  }", 10
-        db "  return vec3(0.022,0.038,0.068);", 10
+        db "  return vec3(0.018,0.028,0.052);", 10
+        db "}", 10
+        ; --- Deep Space Dust / Starfield ---
+        db "vec3 starField(vec2 uv, float bass){", 10
+        db "  vec3 sCol=vec3(0.0);", 10
+        db "  for(int l=0;l<3;l++){", 10
+        db "    float fl=float(l)+1.0;", 10
+        db "    float spd=u_time*(0.15+0.08*fl)+bass*0.04*fl;", 10
+        db "    vec2 p=uv*(3.5+fl*2.2)+vec2(sin(fl*12.3), cos(fl*7.1))*spd;", 10
+        db "    vec2 id=floor(p);", 10
+        db "    vec2 gv=fract(p)-0.5;", 10
+        db "    float rnd=fract(sin(dot(id, vec2(127.1,311.7)))*43758.5453);", 10
+        db "    if(rnd>0.72){", 10
+        db "      vec2 off=vec2(fract(rnd*19.1)-0.5, fract(rnd*47.3)-0.5)*0.6;", 10
+        db "      float d=length(gv-off);", 10
+        db "      float tw=0.55+0.45*sin(u_time*4.5+rnd*30.0);", 10
+        db "      float st=smoothstep(0.055, 0.0, d)*tw*(0.42/fl);", 10
+        db "      sCol+=mix(vec3(0.55,0.82,1.0), vec3(0.95,0.85,1.0), fract(rnd*7.0))*st;", 10
+        db "    }", 10
+        db "  }", 10
+        db "  return sCol;", 10
         db "}", 10
         db "float glyph(int ch, vec2 p){", 10
         db "  int col=int(floor(p.x));", 10
         db "  int row=int(floor(p.y));", 10
         db "  if(col<0||col>4||row<0||row>6) return 0.0;", 10
         db "  vec2 m=vec2(0.0);", 10
+        db "  if(ch==33) m=vec2(135300.0,132.0);", 10
         db "  if(ch==38) m=vec2(412053.0,19021.0);", 10
         db "  if(ch==39) m=vec2(135296.0,0.0);", 10
         db "  if(ch==40) m=vec2(69896.0,8322.0);", 10
         db "  if(ch==41) m=vec2(266306.0,2184.0);", 10
+        db "  if(ch==43) m=vec2(4254.0,4224.0);", 10
         db "  if(ch==44) m=vec2(0.0,4232.0);", 10
         db "  if(ch==45) m=vec2(14.0,0.0);", 10
         db "  if(ch==46) m=vec2(0.0,132.0);", 10
@@ -503,19 +849,22 @@ section .data
         db "  float fch=(cIdx==0)?v.x:((cIdx==1)?v.y:((cIdx==2)?v.z:v.w));", 10
         db "  return int(floor(fch+0.5));", 10
         db "}", 10
-        ; --- Egymenetes raymarch befoglalo gomb (R=2.85) gyorsitassal ---
+        ; --- Modern Volumetric Raymarcher + Reflective Ripple Floor + God Rays ---
         db "vec3 renderScene(vec2 uv){", 10
         db "  float bass=u_extra.y;", 10
-        db "  float camA=sin(u_time*0.28)*0.22;", 10
-        db "  float camZ=-3.25+0.12*cos(u_time*0.35)-0.06*bass;", 10
-        db "  vec3 ro=vec3(sin(camA)*3.25, 0.18*sin(u_time*0.4), camZ);", 10
+        db "  float high=u_demo.w;", 10
+        db "  float kickPunch=smoothstep(0.55, 0.98, bass)*u_demo.z;", 10
+        db "  float camA=sin(u_time*0.28)*0.24;", 10
+        db "  float camZ=-3.45+0.12*cos(u_time*0.35)-0.26*kickPunch;", 10
+        db "  vec2 shake=vec2(sin(u_time*73.0), cos(u_time*91.0))*(0.020*kickPunch + 0.014*smoothstep(0.52,0.95,high)*u_demo.z);", 10
+        db "  vec3 ro=vec3(sin(camA)*3.45+shake.x, 0.28+0.16*sin(u_time*0.4)+shake.y, camZ);", 10
         db "  vec3 rd=normalize(vec3(uv*1.48, 1.0));", 10
         db "  rd.xz*=rot(-camA*0.85);", 10
         db "  float a=u_phases.x, th=u_phases.y;", 10
         db "  vec3 lm=magPos(th, a);", 10
         db "  float t=9.0;", 10
         db "  float b=dot(ro,rd);", 10
-        db "  float c=dot(ro,ro)-8.1225;", 10
+        db "  float c=dot(ro,ro)-8.41;", 10
         db "  float h=b*b-c;", 10
         db "  if(h>0.0){", 10
         db "    float sq=sqrt(h);", 10
@@ -535,52 +884,64 @@ section .data
         db "  float amb=u_sliders.y*0.32;", 10
         db "  float magI=u_sliders.w*2.8*(1.0+0.35*bass);", 10
         db "  if(t<8.5){", 10
-        db "    vec3 p=ro+rd*t, n=calcNormal(p);", 10
-        db "    float ao=calcAO(p, n);", 10
-        db "    vec3 ldir=lm-p; float dist=length(ldir); ldir/=dist;", 10
-        db "    float sh=calcSoftShadow(p+n*0.015, ldir, dist);", 10
-        db "    float atten=1.0/(1.0+0.26*dist*dist);", 10
-        db "    float diff=max(dot(n,ldir),0.0);", 10
-        db "    float spec=pow(diff,56.0);", 10
-        db "    float ndv=max(dot(n,-rd),0.0);", 10
-        db "    float fres=0.65+0.35*pow(1.0-ndv,3.0);", 10
-        db "    vec3 reflDir=reflect(rd, n);", 10
-        db "    vec3 reflCol=envReflect(reflDir, lm-p, magI, bass);", 10
-        db "    float rt=0.04, rhit=0.0;", 10
-        db "    for(int j=0;j<12;j++){", 10
-        db "      vec3 rp=p+n*0.02+reflDir*rt;", 10
-        db "      if(dot(rp,rp)>8.1225) break;", 10
-        db "      float rdStep=map(rp);", 10
-        db "      if(rdStep<0.008){ rhit=1.0; break; }", 10
-        db "      rt+=clamp(rdStep*0.70, 0.03, 0.38);", 10
-        db "      if(rt>3.2) break;", 10
-        db "    }", 10
-        db "    if(rhit>0.5){", 10
-        db "      vec3 rp=p+n*0.02+reflDir*rt;", 10
-        db "      vec3 rn=calcNormal(rp);", 10
-        db "      float rdiff=max(dot(rn, normalize(lm-rp)), 0.0);", 10
-        db "      reflCol=mix(reflCol, vec3(0.85,0.92,1.0)*(0.25+0.95*rdiff)*magI, 0.72);", 10
-        db "    }", 10
-        db "    float isCube=step(mapCube(p), mapTorus(p));", 10
-        db "    vec3 pr=p; mat2 rA=rot(a); pr.xz*=rA; pr.yz*=rA;", 10
-        db "    float spVal=spikeField(pr);", 10
-        db "    float orgBoost=clamp(1.0 - spVal*3.0, 0.25, 1.0);", 10
-        db "    float spGlow=clamp(spVal*5.5, 0.0, 1.0);", 10
-        db "    vec3 chromeBase=vec3(0.76,0.82,0.90);", 10
-        db "    vec3 cubeBase=vec3(0.95,0.58,0.25);", 10
-        db "    vec3 baseCol=mix(chromeBase, cubeBase, isCube);", 10
-        db "    float reflAmt=mix(0.78*fres*(0.6+0.4*orgBoost), 0.35*fres, isCube);", 10
-        db "    col=baseCol*(amb+0.08)*ao;", 10
-        db "    col=mix(col, baseCol*reflCol, reflAmt);", 10
-        db "    col+=vec3(1.8,2.25,2.7)*magI*(diff*sh*0.55+spec*sh*1.8)*atten*(0.35+0.65*ao);", 10
-        db "    col+=(1.0-isCube)*vec3(0.25,0.85,1.25)*spGlow*(0.35+0.65*diff);", 10
+        db "    vec3 p=ro+rd*t;", 10
+        db "    col=shadeHit(p, rd, lm, magI, bass, amb);", 10
         db "  } else {", 10
         db "    float horizon=gl_FragCoord.y/u_res.y;", 10
-        db "    col=vec3(0.015,0.022,0.045+0.06*horizon)+vec3(0.01,0.02,0.04)*bass;", 10
+        db "    col=vec3(0.008,0.012,0.028+0.045*horizon)+vec3(0.008,0.016,0.032)*bass;", 10
+        db "    col+=starField(uv, bass);", 10
         db "    float sPy=u_res.y-gl_FragCoord.y;", 10
         db "    col+=vuMeter(gl_FragCoord.x, sPy);", 10
+        ; Raymarched Dark Mirror Floor with Bass Shockwave Ripples (y = -1.78, [G])
+        db "    if(u_fx.y>0.5 && rd.y<-0.005){", 10
+        db "      float tf=(-1.78-ro.y)/rd.y;", 10
+        db "      if(tf>0.0 && tf<32.0){", 10
+        db "        vec3 fp=ro+rd*tf;", 10
+        db "        float rDist=length(fp.xz);", 10
+        db "        float rip=sin(rDist*4.5-u_time*4.8)*exp(-rDist*0.24)*(0.035+0.055*bass);", 10
+        db "        vec3 fNorm=normalize(vec3(fp.x*rip*0.35, 1.0, fp.z*rip*0.35));", 10
+        db "        vec3 rDir=reflect(rd, fNorm);", 10
+        db "        float rt=0.05, rHit=0.0;", 10
+        db "        for(int ri=0;ri<28;ri++){", 10
+        db "          vec3 rp=fp+rDir*rt;", 10
+        db "          if(dot(rp,rp)>8.5 && rt>3.2) break;", 10
+        db "          float rStep=map(rp);", 10
+        db "          if(rStep<0.012){ rHit=1.0; break; }", 10
+        db "          rt+=clamp(rStep*0.65, 0.04, 0.35);", 10
+        db "          if(rt>7.0) break;", 10
+        db "        }", 10
+        db "        vec3 floorRefl=envReflect(rDir, lm-fp, magI, bass)*0.32;", 10
+        db "        if(rHit>0.5){", 10
+        db "          floorRefl=shadeHit(fp+rDir*rt, rDir, lm, magI, bass, amb);", 10
+        db "        }", 10
+        db "        float lDist2=dot(fp-lm, fp-lm);", 10
+        db "        vec3 poolLight=vec3(0.28,0.68,1.0)*magI/(1.0+lDist2*0.28);", 10
+        db "        float shockRing=smoothstep(0.86, 0.99, sin(rDist*3.2-u_time*5.2))*exp(-rDist*0.22)*bass;", 10
+        db "        float fresFloor=pow(1.0-max(dot(fNorm,-rd),0.0), 3.0);", 10
+        db "        float fog=exp(-tf*0.095);", 10
+        db "        vec3 fCol=vec3(0.012,0.016,0.030)+poolLight*0.55+floorRefl*(0.24+0.52*fresFloor)+vec3(0.2,0.85,1.0)*shockRing*0.75;", 10
+        db "        col=mix(col, fCol, fog*0.92);", 10
+        db "        t=tf;", 10
+        db "      }", 10
+        db "    }", 10
         db "  }", 10
-        db "  if(magI>0.001){", 10
+        ; Volumetric Raymarched God Rays / Shadowed Light Scattering
+        db "  if(magI>0.01){", 10
+        db "    float tEnd=min(t, 6.2);", 10
+        db "    float stepV=tEnd/22.0;", 10
+        db "    float jit=fract(sin(dot(gl_FragCoord.xy, vec2(12.9898,78.233)))*43758.5453);", 10
+        db "    vec3 volAcc=vec3(0.0);", 10
+        db "    for(int vi=0;vi<22;vi++){", 10
+        db "      float tv=(float(vi)+jit)*stepV;", 10
+        db "      vec3 vp=ro+rd*tv;", 10
+        db "      vec3 toL=lm-vp;", 10
+        db "      float dL=length(toL);", 10
+        db "      float occ=clamp(map(vp+normalize(toL)*min(dL*0.5, 0.45))*4.5, 0.15, 1.0);", 10
+        db "      float phase=1.0/(1.0+dL*dL*1.45);", 10
+        db "      volAcc+=vec3(0.32,0.74,1.0)*phase*occ;", 10
+        db "    }", 10
+        db "    col+=volAcc*stepV*magI*(0.24+0.18*bass);", 10
+        ; Orbiting light trail + Anamorphic Lens Flare
         db "    for(int k=0;k<6;k++){", 10
         db "      float fk=float(k);", 10
         db "      vec3 lp=magPos(th-fk*0.14*(0.3+u_sliders.z), a);", 10
@@ -592,35 +953,49 @@ section .data
         db "        col+=mix(vec3(1.7,2.2,2.6),vec3(0.3,0.8,1.8),fk*0.18)*g;", 10
         db "      }", 10
         db "    }", 10
+        db "    vec3 lRel=lm-ro; lRel.xz*=rot(camA*0.85);", 10
+        db "    if(lRel.z>0.2 && length(lRel)<t){", 10
+        db "      vec2 lUV=lRel.xy/(lRel.z*1.48);", 10
+        db "      float streak=exp(-abs(uv.y-lUV.y)*65.0)*exp(-abs(uv.x-lUV.x)*2.4);", 10
+        db "      col+=vec3(0.35,0.85,1.0)*streak*magI*(0.32+0.35*bass);", 10
+        db "    }", 10
         db "  }", 10
         db "  return col;", 10
         db "}", 10
         db "void main(){", 10
         db "  float bass=u_extra.y;", 10
+        db "  float high=u_demo.w;", 10
         db "  vec2 uv=(gl_FragCoord.xy-0.5*u_res)/u_res.y;", 10
-        db "  vec3 col=renderScene(uv);", 10
-        db "  vec2 caPix=uv*((2.4+7.5*bass)*dot(uv,uv));", 10
+        db "  vec2 sUv=uv;", 10
+        db "  float glitchTrig=max(smoothstep(0.64,0.98,bass), smoothstep(0.60,0.95,high))*u_demo.z;", 10
+        db "  if(glitchTrig>0.01){", 10
+        db "    float bandId=floor(gl_FragCoord.y/14.0);", 10
+        db "    float rnd=fract(sin(bandId*91.7+floor(u_time*30.0)*17.3)*43758.5453);", 10
+        db "    if(rnd>0.78) sUv.x+=(rnd-0.89)*0.16*glitchTrig;", 10
+        db "  }", 10
+        db "  vec3 col=renderScene(sUv);", 10
+        db "  vec2 caPix=uv*((2.4+8.5*bass+5.0*glitchTrig)*dot(uv,uv));", 10
         db "  vec3 grad=dFdx(col)*caPix.x+dFdy(col)*caPix.y;", 10
         db "  col.r+=grad.r;", 10
         db "  col.b-=grad.b;", 10
-        db "  col*=0.94+0.06*sin(gl_FragCoord.y*3.14159);", 10
-        db "  col*=1.0-0.25*dot(uv,uv);", 10
+        db "  col*=1.0-0.26*dot(uv,uv);", 10
         db "  col=col/(1.0+col*0.24);", 10
         db "  col=pow(clamp(col,0.0,1.0),vec3(0.85));", 10
+        db "  col=mix(col, vec3(1.0), clamp(u_fx.w, 0.0, 1.0));", 10
         db "  float px=gl_FragCoord.x;", 10
         db "  float py=u_res.y-gl_FragCoord.y;", 10
-        ; --- FELSO PLAYER SAV (py: 8..38) ---
+        ; --- TOP PLAYER BAR (py: 8..38) ---
         db "  if(py>=8.0 && py<=38.0 && px>=12.0 && px<=u_res.x-12.0){", 10
         db "    col=mix(col,vec3(0.03,0.06,0.12),0.86);", 10
         db "    if(py<9.5||py>36.5||px<13.5||px>u_res.x-13.5) col=vec3(0.25,0.65,0.95);", 10
-        ; 1. Prev gomb (px: 20..64)
+        ; 1. Prev button (20..64)
         db "    if(px>=20.0 && px<=64.0 && py>=12.0 && py<=34.0){", 10
         db "      col=mix(col,vec3(0.12,0.22,0.36),0.75);", 10
         db "      if(abs(px-36.0)<1.3 && abs(py-23.0)<5.5) col=vec3(0.4,0.9,1.0);", 10
         db "      float ptx=48.0-px; float pty=abs(py-23.0);", 10
         db "      if(ptx>=0.0 && ptx<=9.0 && pty<=(9.0-ptx)*0.6) col=vec3(0.4,0.9,1.0);", 10
         db "    }", 10
-        ; 2. Play/Pause gomb (px: 70..114)
+        ; 2. Play/Pause button (70..114)
         db "    if(px>=70.0 && px<=114.0 && py>=12.0 && py<=34.0){", 10
         db "      vec3 stCol=(u_player.z>0.5)?vec3(1.0,0.65,0.2):vec3(0.25,0.95,0.65);", 10
         db "      col=mix(col,stCol*0.28,0.8);", 10
@@ -632,27 +1007,72 @@ section .data
         db "        if(triX>=0.0 && triX<=12.0 && triY<=(12.0-triX)*0.55) col=stCol;", 10
         db "      }", 10
         db "    }", 10
-        ; 3. Next gomb (px: 120..164)
+        ; 3. Next button (120..164)
         db "    if(px>=120.0 && px<=164.0 && py>=12.0 && py<=34.0){", 10
         db "      col=mix(col,vec3(0.12,0.22,0.36),0.75);", 10
         db "      float ntx=px-136.0; float nty=abs(py-23.0);", 10
         db "      if(ntx>=0.0 && ntx<=9.0 && nty<=(9.0-ntx)*0.6) col=vec3(0.4,0.9,1.0);", 10
         db "      if(abs(px-148.0)<1.3 && abs(py-23.0)<5.5) col=vec3(0.4,0.9,1.0);", 10
         db "    }", 10
-        ; 4. Track szamlalo + cim (px: 174 .. seekX0-12)
+        ; Layout anchors from right edge
         db "    float seekX0=u_res.x-430.0;", 10
         db "    float seekX1=u_res.x-176.0;", 10
-        db "    if(px>=174.0 && px<seekX0-10.0 && py>=14.0 && py<=32.0){", 10
-        db "      int tci=int(floor((px-174.0)/15.0));", 10
+        db "    float timeX0=seekX0-144.0;", 10
+        db "    float fpsX0=timeX0-86.0;", 10
+        ; 4. Track title (174 .. fpsX0-10)
+        db "    if(px>=174.0 && px<fpsX0-10.0 && py>=14.0 && py<=32.0){", 10
+        db "      int tci=int(floor((px-174.0)/14.0));", 10
         db "      if(tci>=0 && tci<u_top_len){", 10
-        db "        float tCellX=mod(px-174.0,15.0);", 10
-        db "        if(tCellX>=1.0 && tCellX<13.5){", 10
-        db "          vec2 tgp=vec2((tCellX-1.0)/2.5, (py-14.25)/2.5);", 10
+        db "        float tCellX=mod(px-174.0,14.0);", 10
+        db "        if(tCellX>=1.0 && tCellX<12.5){", 10
+        db "          vec2 tgp=vec2((tCellX-1.0)/2.3, (py-14.5)/2.4);", 10
         db "          if(glyph(topChar(tci),tgp)>0.5) col=vec3(0.96,0.93,0.68)*(1.0+0.18*bass);", 10
         db "        }", 10
         db "      }", 10
         db "    }", 10
-        ; 5. Gyorstekero-bar (Seek bar: seekX0 .. seekX1)
+        ; 4b. Live FPS readout (fpsX0 .. fpsX0+74, 6 chars: XXXFPS)
+        db "    if(px>=fpsX0 && px<fpsX0+74.0 && py>=15.0 && py<=31.0){", 10
+        db "      int fci=int(floor((px-fpsX0)/12.0));", 10
+        db "      float fCellX=mod(px-fpsX0,12.0);", 10
+        db "      if(fCellX>=1.0 && fCellX<11.0){", 10
+        db "        vec2 fgp=vec2((fCellX-1.0)/2.0, (py-15.5)/2.1);", 10
+        db "        int fpsI=int(floor(u_fx.z+0.5));", 10
+        db "        int fch=32;", 10
+        db "        if(fci==0){ int h=fpsI/100; if(h>9)h=9; fch=(h>0)?(48+h):32; }", 10
+        db "        if(fci==1){ int t=(fpsI/10)-(fpsI/100)*10; fch=(fpsI>=10)?(48+t):32; }", 10
+        db "        if(fci==2) fch=48+(fpsI-(fpsI/10)*10);", 10
+        db "        if(fci==3) fch=70;", 10
+        db "        if(fci==4) fch=80;", 10
+        db "        if(fci==5) fch=83;", 10
+        db "        if(glyph(fch,fgp)>0.5) col=vec3(0.32,0.95,0.68);", 10
+        db "      }", 10
+        db "    }", 10
+        ; 4c. MM:SS/MM:SS Time readout (timeX0 .. timeX0+132, 11 chars)
+        db "    if(px>=timeX0 && px<timeX0+132.0 && py>=15.0 && py<=31.0){", 10
+        db "      int mci=int(floor((px-timeX0)/12.0));", 10
+        db "      float mCellX=mod(px-timeX0,12.0);", 10
+        db "      if(mCellX>=1.0 && mCellX<11.0){", 10
+        db "        vec2 mgp=vec2((mCellX-1.0)/2.0, (py-15.5)/2.1);", 10
+        db "        int pSec=int(floor(u_player.x*0.001));", 10
+        db "        int lSec=int(floor(u_player.y*0.001));", 10
+        db "        int pM=pSec/60; if(pM>99)pM=99; int pS=pSec-(pSec/60)*60;", 10
+        db "        int lM=lSec/60; if(lM>99)lM=99; int lS=lSec-(lSec/60)*60;", 10
+        db "        int mch=32;", 10
+        db "        if(mci==0) mch=48+(pM/10);", 10
+        db "        if(mci==1) mch=48+(pM-(pM/10)*10);", 10
+        db "        if(mci==2) mch=58;", 10
+        db "        if(mci==3) mch=48+(pS/10);", 10
+        db "        if(mci==4) mch=48+(pS-(pS/10)*10);", 10
+        db "        if(mci==5) mch=47;", 10
+        db "        if(mci==6) mch=48+(lM/10);", 10
+        db "        if(mci==7) mch=48+(lM-(lM/10)*10);", 10
+        db "        if(mci==8) mch=58;", 10
+        db "        if(mci==9) mch=48+(lS/10);", 10
+        db "        if(mci==10) mch=48+(lS-(lS/10)*10);", 10
+        db "        if(glyph(mch,mgp)>0.5) col=vec3(0.55,0.88,1.0);", 10
+        db "      }", 10
+        db "    }", 10
+        ; 5. Seek bar (seekX0 .. seekX1)
         db "    if(px>=seekX0-2.0 && px<=seekX1+2.0 && py>=15.0 && py<=31.0){", 10
         db "      float sW=seekX1-seekX0;", 10
         db "      float tFrac=(u_player.y>0.5)?clamp(u_player.x/u_player.y,0.0,1.0):0.0;", 10
@@ -663,7 +1083,7 @@ section .data
         db "      float skx=seekX0+tFrac*sW;", 10
         db "      if(abs(px-skx)<=3.5 && abs(py-23.0)<=7.0) col=vec3(0.98,0.99,1.0);", 10
         db "    }", 10
-        ; 6. Hangszoro ikon + Mute jelzes (volIconX: u_res.x-160 .. u_res.x-142)
+        ; 6. Speaker icon + Mute (u_res.x-158 .. u_res.x-142)
         db "    float spkX=u_res.x-158.0;", 10
         db "    if(px>=spkX && px<=spkX+16.0 && py>=15.0 && py<=31.0){", 10
         db "      vec3 spkCol=(u_extra.w>0.5)?vec3(1.0,0.35,0.35):vec3(0.4,0.9,1.0);", 10
@@ -678,7 +1098,7 @@ section .data
         db "        if(abs(px-(spkX+14.5))<1.1 && abs(py-23.0)<=5.5) col=spkCol;", 10
         db "      }", 10
         db "    }", 10
-        ; 7. Hangero csuszka a felso savban (volX0: u_res.x-138 .. volX1: u_res.x-24)
+        ; 7. Volume slider (u_res.x-138 .. u_res.x-24)
         db "    float volX0=u_res.x-138.0;", 10
         db "    float volX1=u_res.x-24.0;", 10
         db "    if(px>=volX0-4.0 && px<=volX1+4.0 && py>=15.0 && py<=31.0){", 10
@@ -692,7 +1112,7 @@ section .data
         db "      if(abs(px-vkx)<=3.5 && abs(py-23.0)<=7.0) col=vec3(0.98,0.99,1.0);", 10
         db "    }", 10
         db "  }", 10
-        ; --- ALSO HULLAMOZO SCROLLER (5x7 font, 3x3 px/pont) ---
+        ; --- BOTTOM SINE SCROLLER ---
         db "  float sy_bot=u_res.y-36.0;", 10
         db "  if(py>sy_bot-22.0 && py<sy_bot+24.0){", 10
         db "    col=mix(col,vec3(0.02,0.04,0.08),0.72);", 10
@@ -711,7 +1131,7 @@ section .data
         db "      }", 10
         db "    }", 10
         db "  }", 10
-        ; --- HUD PANEL (5 slider: ROT SPD, AMBIENT, MAG SPD, MAG PWR, SPIKES) ---
+        ; --- HUD PANEL ([H]) ---
         db "  if(u_extra.x>0.5){", 10
         db "    if(px>=12.0 && px<=350.0 && py>=46.0 && py<=198.0){", 10
         db "      col=mix(col,vec3(0.04,0.06,0.10),0.84);", 10
@@ -753,9 +1173,9 @@ section .text
     global WinMain
     global main
 
-; ----------------------------------------------------------------------------
-; Segedfuggvenyek: ASCII szam konverzio es MCI hossz lekero
-; ----------------------------------------------------------------------------
+; ============================================================================
+; ASCII & String Utilities
+; ============================================================================
 parse_uint_ascii:
     xor eax, eax
 .loop:
@@ -798,6 +1218,708 @@ append_uint_ascii:
     pop rbx
     ret
 
+extract_filename_only:
+    push rsi
+    mov rax, rcx
+    mov rsi, rcx
+.scan:
+    movzx edx, byte [rsi]
+    test dl, dl
+    jz .done
+    cmp dl, '\'
+    je .mark
+    cmp dl, '/'
+    je .mark
+    inc rsi
+    jmp .scan
+.mark:
+    inc rsi
+    mov rax, rsi
+    jmp .scan
+.done:
+    pop rsi
+    ret
+
+; ============================================================================
+; Goertzel 32-Band Filter Bank Setup + WASAPI Loopback Init & Update
+; ============================================================================
+fft_init_tables:
+    push rbx
+    sub rsp, 32
+
+    cvtsi2ss xmm4, dword [wfx_rate]
+    movss xmm5, [c_f_start]
+    movss xmm6, [c_g_start]
+    lea rbx, [goertzel_c]
+    lea rdx, [goertzel_g]
+    xor ecx, ecx
+
+.loop:
+    movss [rsp], xmm5
+    fldpi
+    fadd st0, st0
+    fmul dword [rsp]
+    movss [rsp], xmm4
+    fdiv dword [rsp]
+    fcos
+    fadd st0, st0
+    fstp dword [rbx + rcx * 4]
+
+    movss [rdx + rcx * 4], xmm6
+
+    mulss xmm5, [c_f_step]
+    mulss xmm6, [c_g_step]
+    inc ecx
+    cmp ecx, 32
+    jl .loop
+
+    add rsp, 32
+    pop rbx
+    ret
+
+wasapi_init:
+    push rbx
+    sub rsp, 64
+
+    lea rcx, [dll_ole32]
+    call LoadLibraryA
+    test rax, rax
+    jz .fail
+    mov rbx, rax
+
+    mov rcx, rbx
+    lea rdx, [fn_CoInitializeEx]
+    call GetProcAddress
+    test rax, rax
+    jz .fail
+    mov [pCoInitializeEx], rax
+
+    mov rcx, rbx
+    lea rdx, [fn_CoCreateInstance]
+    call GetProcAddress
+    test rax, rax
+    jz .fail
+    mov [pCoCreateInstance], rax
+
+    ; COINIT_APARTMENTTHREADED (2) - required so MCI DirectShow MP3 driver loads!
+    xor ecx, ecx
+    mov edx, 2
+    call [pCoInitializeEx]
+
+    lea rcx, [CLSID_MMDeviceEnumerator]
+    xor edx, edx
+    mov r8d, 23
+    lea r9, [IID_IMMDeviceEnumerator]
+    lea rax, [pEnumerator]
+    mov [rsp + 32], rax
+    call [pCoCreateInstance]
+    test eax, eax
+    js .fail
+
+    mov rcx, [pEnumerator]
+    xor edx, edx
+    xor r8d, r8d
+    lea r9, [pDevice]
+    mov rax, [rcx]
+    call [rax + 32]
+    test eax, eax
+    js .fail
+
+    mov rcx, [pDevice]
+    lea rdx, [IID_IAudioClient]
+    mov r8d, 23
+    xor r9d, r9d
+    lea rax, [pAudioClient]
+    mov [rsp + 32], rax
+    mov rax, [rcx]
+    call [rax + 24]
+    test eax, eax
+    js .fail
+
+    mov rcx, [pAudioClient]
+    lea rdx, [pwfx]
+    mov rax, [rcx]
+    call [rax + 64]
+    test eax, eax
+    js .fail
+
+    mov rsi, [pwfx]
+    movzx eax, word [rsi + 2]
+    test eax, eax
+    jz .fail
+    mov [wfx_ch], eax
+
+    mov eax, [rsi + 4]
+    test eax, eax
+    jz .fail
+    mov [wfx_rate], eax
+
+    movzx eax, word [rsi + 14]
+    mov [wfx_bits], eax
+
+    movzx eax, word [rsi]
+    cmp eax, 3
+    je .is_flt
+    cmp eax, 0xFFFE
+    jne .is_int
+    mov eax, [rsi + 24]
+    cmp eax, 3
+    je .is_flt
+.is_int:
+    mov dword [wfx_is_float], 0
+    jmp .init_client
+.is_flt:
+    mov dword [wfx_is_float], 1
+
+.init_client:
+    mov rcx, [pAudioClient]
+    xor edx, edx
+    mov r8d, 0x00020000
+    mov r9, 10000000
+    mov qword [rsp + 32], 0
+    mov rax, [pwfx]
+    mov [rsp + 40], rax
+    mov qword [rsp + 48], 0
+    mov rax, [rcx]
+    call [rax + 24]
+    test eax, eax
+    js .fail
+
+    mov rcx, [pAudioClient]
+    lea rdx, [IID_IAudioCaptureClient]
+    lea r8, [pCaptureClient]
+    mov rax, [rcx]
+    call [rax + 112]
+    test eax, eax
+    js .fail
+
+    mov rcx, [pAudioClient]
+    mov rax, [rcx]
+    call [rax + 80]
+    test eax, eax
+    js .fail
+
+    mov dword [wasapi_ok], 1
+
+.fail:
+    call fft_init_tables
+    add rsp, 64
+    pop rbx
+    ret
+
+wasapi_update:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    sub rsp, 72
+
+    cmp dword [wasapi_ok], 0
+    je .done
+
+.pkt_loop:
+    mov dword [rsp + 56], 0
+    mov rcx, [pCaptureClient]
+    lea rdx, [rsp + 56]
+    mov rax, [rcx]
+    call [rax + 40]
+    test eax, eax
+    js .analyze
+    mov ecx, [rsp + 56]
+    test ecx, ecx
+    jz .analyze
+
+    mov qword [rsp + 32], 0
+    mov qword [rsp + 40], 0
+    mov qword [rsp + 48], 0
+    mov dword [rsp + 56], 0
+    mov dword [rsp + 60], 0
+    mov rcx, [pCaptureClient]
+    lea rdx, [rsp + 48]
+    lea r8, [rsp + 56]
+    lea r9, [rsp + 60]
+    mov rax, [rcx]
+    call [rax + 24]
+    test eax, eax
+    js .analyze
+
+    mov rsi, [rsp + 48]
+    mov ecx, [rsp + 56]
+    mov edx, [rsp + 60]
+    test edx, 2
+    jnz .release_pkt
+    test rsi, rsi
+    jz .release_pkt
+    test ecx, ecx
+    jz .release_pkt
+
+    mov r8d, [wfx_ch]
+    mov r9d, [fft_wr_idx]
+    lea rdi, [fft_ring]
+
+    cmp dword [wfx_is_float], 0
+    je .copy_i16
+
+.copy_f32:
+    movss xmm0, [rsi]
+    cmp r8d, 2
+    jl .store_f32
+    addss xmm0, [rsi + 4]
+    mulss xmm0, [c_half]
+.store_f32:
+    movss [rdi + r9 * 4], xmm0
+    inc r9d
+    and r9d, 511
+    mov eax, r8d
+    shl eax, 2
+    add rsi, rax
+    dec ecx
+    jnz .copy_f32
+    mov [fft_wr_idx], r9d
+    jmp .release_pkt
+
+.copy_i16:
+    movsx eax, word [rsi]
+    cvtsi2ss xmm0, eax
+    cmp r8d, 2
+    jl .scale_i16
+    movsx eax, word [rsi + 2]
+    cvtsi2ss xmm1, eax
+    addss xmm0, xmm1
+    mulss xmm0, [c_half]
+.scale_i16:
+    mulss xmm0, [c_i16_scale]
+    movss [rdi + r9 * 4], xmm0
+    inc r9d
+    and r9d, 511
+    mov eax, r8d
+    shl eax, 1
+    add rsi, rax
+    dec ecx
+    jnz .copy_i16
+    mov [fft_wr_idx], r9d
+
+.release_pkt:
+    mov rcx, [pCaptureClient]
+    mov edx, [rsp + 56]
+    mov rax, [rcx]
+    call [rax + 32]
+    jmp .pkt_loop
+
+.analyze:
+    lea rsi, [fft_ring]
+    lea rdi, [u_bands]
+    lea rbx, [goertzel_c]
+    lea r12, [goertzel_g]
+    mov r8d, [fft_wr_idx]
+    sub r8d, FFT_N
+    and r8d, 511
+
+    xor ecx, ecx
+.band_loop:
+    movss xmm3, [rbx + rcx * 4]
+    xorps xmm1, xmm1
+    xorps xmm2, xmm2
+    mov edx, r8d
+    xor eax, eax
+
+.sample_loop:
+    movss xmm0, [rsi + rdx * 4]
+    movaps xmm4, xmm3
+    mulss xmm4, xmm1
+    addss xmm0, xmm4
+    subss xmm0, xmm2
+    movaps xmm2, xmm1
+    movaps xmm1, xmm0
+
+    inc edx
+    and edx, 511
+    inc eax
+    cmp eax, FFT_N
+    jl .sample_loop
+
+    movaps xmm0, xmm1
+    mulss xmm0, xmm0
+    movaps xmm4, xmm2
+    mulss xmm4, xmm4
+    addss xmm0, xmm4
+    movaps xmm4, xmm3
+    mulss xmm4, xmm1
+    mulss xmm4, xmm2
+    subss xmm0, xmm4
+    maxss xmm0, [c_zero]
+    sqrtss xmm0, xmm0
+    mulss xmm0, [r12 + rcx * 4]
+    minss xmm0, [c_pos1]
+
+    movss xmm4, [rdi + rcx * 4]
+    comiss xmm0, xmm4
+    jbe .decay
+    subss xmm0, xmm4
+    mulss xmm0, [c_atk]
+    addss xmm4, xmm0
+    jmp .store_band
+.decay:
+    mulss xmm4, [c_dec]
+.store_band:
+    movss [rdi + rcx * 4], xmm4
+
+    inc ecx
+    cmp ecx, 32
+    jl .band_loop
+
+    ; Sub-bass & Kick envelope (bands 0..3)
+    movss xmm0, [rdi]
+    addss xmm0, [rdi + 4]
+    addss xmm0, [rdi + 8]
+    addss xmm0, [rdi + 12]
+    mulss xmm0, [c_bass_mul]
+    minss xmm0, [c_pos1]
+    movss [bass_env], xmm0
+
+    ; Snare & Hi-Hat transient envelope (bands 20..27)
+    movss xmm0, [rdi + 80]
+    addss xmm0, [rdi + 84]
+    addss xmm0, [rdi + 88]
+    addss xmm0, [rdi + 92]
+    addss xmm0, [rdi + 96]
+    addss xmm0, [rdi + 100]
+    addss xmm0, [rdi + 104]
+    addss xmm0, [rdi + 108]
+    mulss xmm0, [c_high_mul]
+    minss xmm0, [c_pos1]
+    movss [high_env], xmm0
+
+.done:
+    add rsp, 72
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; ============================================================================
+; 64k Procedural 5-Voice ASM Synthesizer (waveOutOpen)
+; ============================================================================
+fast_sin_01:
+    subss xmm0, [c_half]
+    movaps xmm1, xmm0
+    andps xmm1, [.abs_mask]
+    movss xmm2, [c_half]
+    subss xmm2, xmm1
+    mulss xmm0, xmm2
+    mulss xmm0, [.sixteen]
+    ret
+    align 16
+.abs_mask dd 0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF
+.sixteen  dd 16.0
+
+synth_fill_buffer:
+    push rbx
+    push rsi
+    push rdi
+    sub rsp, 32
+
+    mov rdi, rcx
+    mov ecx, SYNTH_SAMPLES
+    mov esi, [synth_smp_i]
+
+.smp_loop:
+    mov eax, esi
+    xor edx, edx
+    mov ebx, 4800
+    div ebx
+    mov r8d, eax
+    mov r9d, edx
+
+    cvtsi2ss xmm3, r9d
+    xorps xmm5, xmm5
+
+    ; --- 1. KICK DRUM ---
+    test r8d, 3
+    jnz .chk_snare
+    movaps xmm0, xmm3
+    mulss xmm0, [.k_pdec]
+    addss xmm0, [c_pos1]
+    movss xmm1, [.k_psweep]
+    divss xmm1, xmm0
+    addss xmm1, [.k_pbase]
+    mulss xmm1, xmm3
+    divss xmm1, [c_44100]
+    cvttss2si eax, xmm1
+    cvtsi2ss xmm2, eax
+    subss xmm1, xmm2
+    movaps xmm0, xmm1
+    call fast_sin_01
+    movaps xmm1, xmm3
+    mulss xmm1, [.k_edec]
+    addss xmm1, [c_pos1]
+    movss xmm2, [.k_gain]
+    divss xmm2, xmm1
+    mulss xmm0, xmm2
+    addss xmm5, xmm0
+
+.chk_snare:
+    ; --- 2. SNARE DRUM ---
+    mov eax, r8d
+    and eax, 7
+    cmp eax, 4
+    jne .chk_hat
+    movaps xmm0, xmm3
+    mulss xmm0, [.sn_freq]
+    divss xmm0, [c_44100]
+    cvttss2si eax, xmm0
+    cvtsi2ss xmm2, eax
+    subss xmm0, xmm2
+    call fast_sin_01
+    mulss xmm0, [c_half]
+    mov eax, [lfsr_state]
+    mov edx, eax
+    shr edx, 1
+    test eax, 1
+    jz .sn_no_tap
+    xor edx, 0xB400
+.sn_no_tap:
+    mov [lfsr_state], edx
+    and edx, 0xFFFF
+    sub edx, 32768
+    cvtsi2ss xmm1, edx
+    mulss xmm1, [c_i16_scale]
+    addss xmm0, xmm1
+    movaps xmm1, xmm3
+    mulss xmm1, [.sn_edec]
+    addss xmm1, [c_pos1]
+    movss xmm2, [.sn_gain]
+    divss xmm2, xmm1
+    mulss xmm0, xmm2
+    addss xmm5, xmm0
+
+.chk_hat:
+    ; --- 3. HI-HAT ---
+    mov eax, r8d
+    and eax, 3
+    cmp eax, 2
+    jne .do_bass
+    mov eax, [lfsr_state]
+    mov edx, eax
+    shr edx, 1
+    test eax, 1
+    jz .hh_no_tap
+    xor edx, 0xB400
+.hh_no_tap:
+    mov [lfsr_state], edx
+    and edx, 0xFFFF
+    sub edx, 32768
+    cvtsi2ss xmm0, edx
+    mulss xmm0, [c_i16_scale]
+    movaps xmm1, xmm0
+    subss xmm0, [synth_prev_n]
+    movss [synth_prev_n], xmm1
+    movaps xmm1, xmm3
+    mulss xmm1, [.hh_edec]
+    addss xmm1, [c_pos1]
+    movss xmm2, [.hh_gain]
+    divss xmm2, xmm1
+    mulss xmm0, xmm2
+    addss xmm5, xmm0
+
+.do_bass:
+    ; --- 4. ROLLING ACID / SAWTOOTH BASSLINE ---
+    mov eax, r8d
+    shr eax, 4
+    and eax, 3
+    lea rbx, [chord_root]
+    movss xmm0, [rbx + rax * 4]
+    test r8d, 1
+    jz .bass_oct_ok
+    addss xmm0, xmm0
+.bass_oct_ok:
+    cvtsi2ss xmm1, esi
+    mulss xmm0, xmm1
+    divss xmm0, [c_44100]
+    cvttss2si eax, xmm0
+    cvtsi2ss xmm2, eax
+    subss xmm0, xmm2
+    addss xmm0, xmm0
+    subss xmm0, [c_pos1]
+    movss xmm1, [synth_lp_y]
+    subss xmm0, xmm1
+    mulss xmm0, [.bass_cut]
+    addss xmm1, xmm0
+    movss [synth_lp_y], xmm1
+    movaps xmm2, xmm3
+    mulss xmm2, [.bass_dec]
+    addss xmm2, [c_pos1]
+    movss xmm0, [.bass_gain]
+    divss xmm0, xmm2
+    mulss xmm1, xmm0
+    addss xmm5, xmm1
+
+    ; --- 5. FAST 50HZ DEMOSCENE ARPEGGIO ---
+    mov eax, r8d
+    shr eax, 4
+    and eax, 3
+    lea rbx, [chord_root]
+    movss xmm0, [rbx + rax * 4]
+    mov eax, esi
+    xor edx, edx
+    mov ebx, 882
+    div ebx
+    and eax, 3
+    lea rbx, [arp_ratios]
+    mulss xmm0, [rbx + rax * 4]
+    cvtsi2ss xmm1, esi
+    mulss xmm0, xmm1
+    divss xmm0, [c_44100]
+    cvttss2si eax, xmm0
+    cvtsi2ss xmm2, eax
+    subss xmm0, xmm2
+    call fast_sin_01
+    mulss xmm0, [.arp_gain]
+    addss xmm5, xmm0
+
+    mulss xmm5, [vol_level]
+    mulss xmm5, [c_synth_out]
+    cvtss2si eax, xmm5
+    cmp eax, 32767
+    jle .clip_min
+    mov eax, 32767
+.clip_min:
+    cmp eax, -32768
+    jge .store_smp
+    mov eax, -32768
+.store_smp:
+    mov [rdi], ax
+    add rdi, 2
+    inc esi
+    dec ecx
+    jnz .smp_loop
+
+    mov [synth_smp_i], esi
+    add rsp, 32
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+    align 4
+.k_pdec    dd 0.0022
+.k_psweep  dd 135.0
+.k_pbase   dd 44.0
+.k_edec    dd 0.00085
+.k_gain    dd 0.72
+.sn_freq   dd 190.0
+.sn_edec   dd 0.0014
+.sn_gain   dd 0.42
+.hh_edec   dd 0.0038
+.hh_gain   dd 0.24
+.bass_cut  dd 0.14
+.bass_dec  dd 0.00035
+.bass_gain dd 0.44
+.arp_gain  dd 0.14
+
+synth_start:
+    sub rsp, 56
+    cmp qword [hWaveOut], 0
+    jne .already_open
+
+    lea rcx, [hWaveOut]
+    mov edx, -1
+    lea r8, [synth_wfx]
+    xor r9d, r9d
+    mov qword [rsp + 32], 0
+    mov qword [rsp + 40], 0
+    call waveOutOpen
+    test eax, eax
+    jnz .done
+
+    lea rax, [synth_buf0]
+    mov [whdr0], rax
+    mov dword [whdr0 + 8], SYNTH_BYTES
+    mov dword [whdr0 + 16], 0
+
+    lea rax, [synth_buf1]
+    mov [whdr1], rax
+    mov dword [whdr1 + 8], SYNTH_BYTES
+    mov dword [whdr1 + 16], 0
+
+    mov rcx, [hWaveOut]
+    lea rdx, [whdr0]
+    mov r8d, 48
+    call waveOutPrepareHeader
+
+    mov rcx, [hWaveOut]
+    lea rdx, [whdr1]
+    mov r8d, 48
+    call waveOutPrepareHeader
+
+    lea rcx, [synth_buf0]
+    call synth_fill_buffer
+    lea rcx, [synth_buf1]
+    call synth_fill_buffer
+
+    mov rcx, [hWaveOut]
+    lea rdx, [whdr0]
+    mov r8d, 48
+    call waveOutWrite
+
+    mov rcx, [hWaveOut]
+    lea rdx, [whdr1]
+    mov r8d, 48
+    call waveOutWrite
+
+.already_open:
+.done:
+    add rsp, 56
+    ret
+
+synth_stop:
+    sub rsp, 40
+    mov rcx, [hWaveOut]
+    test rcx, rcx
+    jz .done
+    call waveOutReset
+    mov rcx, [hWaveOut]
+    call waveOutClose
+    mov qword [hWaveOut], 0
+.done:
+    add rsp, 40
+    ret
+
+synth_poll:
+    sub rsp, 40
+    cmp dword [synth_mode], 0
+    je .done
+    cmp qword [hWaveOut], 0
+    je .done
+    cmp dword [paused_flag], 0
+    jne .done
+
+    test dword [whdr0 + 16], 1
+    jz .chk_b1
+    lea rcx, [synth_buf0]
+    call synth_fill_buffer
+    mov rcx, [hWaveOut]
+    lea rdx, [whdr0]
+    mov r8d, 48
+    call waveOutWrite
+
+.chk_b1:
+    test dword [whdr1 + 16], 1
+    jz .done
+    lea rcx, [synth_buf1]
+    call synth_fill_buffer
+    mov rcx, [hWaveOut]
+    lea rdx, [whdr1]
+    mov r8d, 48
+    call waveOutWrite
+
+.done:
+    add rsp, 40
+    ret
+
+; ============================================================================
+; Playlist, Metadata & MCI Audio Controls
+; ============================================================================
 query_track_length:
     push rsi
     sub rsp, 32
@@ -817,9 +1939,6 @@ query_track_length:
     pop rsi
     ret
 
-; ----------------------------------------------------------------------------
-; Lejatszasi lista beolvasasa: music\*.mp3
-; ----------------------------------------------------------------------------
 playlist_scan:
     push rbx
     push rsi
@@ -958,16 +2077,34 @@ build_scroller_text:
     mov byte [scroller_txt], 0
     mov byte [top_txt], 0
 
+    cmp dword [synth_mode], 0
+    je .chk_dropped
+    lea rcx, [scroller_txt]
+    lea rdx, [info_synth]
+    call lstrcpyA
+    lea rcx, [top_txt]
+    lea rdx, [tag_synth]
+    call lstrcpyA
+    jmp .to_uniform_arr
+
+.chk_dropped:
+    cmp dword [dropped_flg], 0
+    je .chk_playlist
+    lea rcx, [dropped_path]
+    call extract_filename_only
+    mov rbx, rax
+    jmp .chk_meta_keys
+
+.chk_playlist:
     mov eax, [track_count]
     test eax, eax
     jnz .has_track
-
+    mov dword [synth_mode], 1
     lea rcx, [scroller_txt]
-    lea rdx, [lbl_empty]
+    lea rdx, [info_synth]
     call lstrcpyA
-
     lea rcx, [top_txt]
-    lea rdx, [tag_empty]
+    lea rdx, [tag_synth]
     call lstrcpyA
     jmp .to_uniform_arr
 
@@ -977,6 +2114,7 @@ build_scroller_text:
     lea rbx, [tracks_buf]
     add rbx, rax
 
+.chk_meta_keys:
     mov rcx, rbx
     lea rdx, [meta_cyber]
     call match_alnum_key
@@ -1147,6 +2285,11 @@ build_scroller_text:
     jl .clear_top
 
     xor ecx, ecx
+    cmp dword [synth_mode], 0
+    jne .copy_top_title
+    cmp dword [dropped_flg], 0
+    jne .copy_top_title
+
     mov eax, '['
     cvtsi2ss xmm0, eax
     movss [rdi + rcx * 4], xmm0
@@ -1202,9 +2345,10 @@ build_scroller_text:
     inc ecx
     inc ecx
 
+.copy_top_title:
     lea rsi, [top_txt]
 .top_loop:
-    cmp ecx, 30
+    cmp ecx, 24
     jge .top_done
     movzx eax, byte [rsi]
     test al, al
@@ -1260,11 +2404,31 @@ audio_play_current:
 
     mov dword [track_pos_ms], 0
     mov dword [track_len_ms], 0
-    call build_scroller_text
 
-    mov eax, [track_count]
-    test eax, eax
-    jz .ret
+    cmp dword [synth_mode], 0
+    jne .start_synth
+
+    cmp dword [dropped_flg], 0
+    jne .play_mp3
+    cmp dword [track_count], 0
+    jne .play_mp3
+
+    mov dword [synth_mode], 1
+
+.start_synth:
+    lea rcx, [mci_close_cmd]
+    xor edx, edx
+    xor r8d, r8d
+    xor r9d, r9d
+    call mciSendStringA
+    mov dword [paused_flag], 0
+    call build_scroller_text
+    call synth_start
+    jmp .ret
+
+.play_mp3:
+    call synth_stop
+    call build_scroller_text
 
     lea rcx, [mci_close_cmd]
     xor edx, edx
@@ -1272,24 +2436,44 @@ audio_play_current:
     xor r9d, r9d
     call mciSendStringA
 
+    cmp dword [dropped_flg], 0
+    je .rel_music_dir
+    lea rcx, [rel_path_buf]
+    lea rdx, [dropped_path]
+    call lstrcpyA
+    jmp .resolve_full
+
+.rel_music_dir:
     mov eax, [cur_track]
     imul eax, 128
     lea rbx, [tracks_buf]
     add rbx, rax
-
-    ; 1. Megnyitas: type mpegvideo
-    lea rcx, [mci_cmd_buf]
-    lea rdx, [mci_open_head]
-    call lstrcpyA
-
-    lea rcx, [mci_cmd_buf]
+    lea rcx, [rel_path_buf]
     lea rdx, [music_prefix]
-    call lstrcatA
-
-    lea rcx, [mci_cmd_buf]
+    call lstrcpyA
+    lea rcx, [rel_path_buf]
     mov rdx, rbx
     call lstrcatA
 
+.resolve_full:
+    lea rcx, [rel_path_buf]
+    mov edx, 260
+    lea r8, [full_path_buf]
+    xor r9d, r9d
+    call GetFullPathNameA
+    test eax, eax
+    jnz .full_ok
+    lea rcx, [full_path_buf]
+    lea rdx, [rel_path_buf]
+    call lstrcpyA
+
+.full_ok:
+    lea rcx, [mci_cmd_buf]
+    lea rdx, [mci_open_head]
+    call lstrcpyA
+    lea rcx, [mci_cmd_buf]
+    lea rdx, [full_path_buf]
+    call lstrcatA
     lea rcx, [mci_cmd_buf]
     lea rdx, [mci_open_tail]
     call lstrcatA
@@ -1302,19 +2486,12 @@ audio_play_current:
     test eax, eax
     jz .opened_ok
 
-    ; 2. Fallback megnyitas: type mpegvideo nelkul
     lea rcx, [mci_cmd_buf]
     lea rdx, [mci_open_head]
     call lstrcpyA
-
     lea rcx, [mci_cmd_buf]
-    lea rdx, [music_prefix]
+    lea rdx, [full_path_buf]
     call lstrcatA
-
-    lea rcx, [mci_cmd_buf]
-    mov rdx, rbx
-    call lstrcatA
-
     lea rcx, [mci_cmd_buf]
     lea rdx, [mci_open_plain]
     call lstrcatA
@@ -1335,7 +2512,6 @@ audio_play_current:
     call mciSendStringA
 
     call query_track_length
-
     mov dword [last_vol_i], -1
     call audio_set_volume
 
@@ -1353,26 +2529,29 @@ audio_play_current:
     lea rdx, [mci_err_buf]
     mov r8d, 255
     call mciGetErrorStringA
-
     xor ecx, ecx
     lea rdx, [mci_err_buf]
     lea r8, [mci_err_ttl]
     mov r9d, 0x30
     call MessageBoxA
 
+    mov dword [synth_mode], 1
+    mov dword [dropped_flg], 0
+    mov dword [paused_flag], 0
+    call build_scroller_text
+    call synth_start
+
 .ret:
     add rsp, 48
     pop rbx
     ret
 
-; Gyorstekeres: xmm0 = 0.0 .. 1.0 arany
 audio_seek_fraction:
     push rdi
     sub rsp, 48
 
-    mov eax, [track_count]
-    test eax, eax
-    jz .done
+    cmp dword [synth_mode], 0
+    jne .done
     mov eax, [track_len_ms]
     test eax, eax
     jnz .has_len
@@ -1413,7 +2592,6 @@ audio_seek_fraction:
 
     cmp dword [paused_flag], 0
     jne .done
-
     lea rcx, [mci_play_once]
     xor edx, edx
     xor r8d, r8d
@@ -1427,9 +2605,11 @@ audio_seek_fraction:
 
 audio_next_track:
     sub rsp, 40
+    mov dword [dropped_flg], 0
+    mov dword [synth_mode], 0
     mov eax, [track_count]
     test eax, eax
-    jz .done
+    jz .play_anyway
     mov ecx, [cur_track]
     inc ecx
     cmp ecx, eax
@@ -1437,16 +2617,18 @@ audio_next_track:
     xor ecx, ecx
 .set_idx:
     mov [cur_track], ecx
+.play_anyway:
     call audio_play_current
-.done:
     add rsp, 40
     ret
 
 audio_prev_track:
     sub rsp, 40
+    mov dword [dropped_flg], 0
+    mov dword [synth_mode], 0
     mov eax, [track_count]
     test eax, eax
-    jz .done
+    jz .play_anyway
     mov ecx, [cur_track]
     dec ecx
     jns .set_idx
@@ -1454,16 +2636,18 @@ audio_prev_track:
     dec ecx
 .set_idx:
     mov [cur_track], ecx
+.play_anyway:
     call audio_play_current
-.done:
     add rsp, 40
     ret
 
 audio_toggle_pause:
     sub rsp, 40
-    mov eax, [track_count]
-    test eax, eax
-    jz .done
+    cmp dword [synth_mode], 0
+    je .mp3_pause
+    xor dword [paused_flag], 1
+    jmp .done
+.mp3_pause:
     cmp dword [paused_flag], 0
     jne .do_resume
     mov dword [paused_flag], 1
@@ -1484,16 +2668,12 @@ audio_toggle_pause:
     add rsp, 40
     ret
 
-audio_init:
-    sub rsp, 40
-    call playlist_scan
-    call audio_play_current
-    add rsp, 40
-    ret
-
 audio_set_volume:
     push rdi
     sub rsp, 32
+
+    cmp dword [synth_mode], 0
+    jne .vol_unchanged
 
     movss xmm0, [vol_level]
     mulss xmm0, [c_1000]
@@ -1544,16 +2724,28 @@ audio_set_volume:
     pop rdi
     ret
 
-audio_update_bass:
+audio_update:
     push rsi
     sub rsp, 32
 
-    cmp dword [track_count], 0
-    je .zero_bass
+    call wasapi_update
+    call synth_poll
+
+    cmp dword [synth_mode], 0
+    je .mp3_status
+
+    mov eax, [synth_smp_i]
+    xor edx, edx
+    mov ecx, 44
+    div ecx
+    mov [track_pos_ms], eax
+    mov dword [track_len_ms], 0
+    jmp .chk_fallback_bass
+
+.mp3_status:
     cmp dword [paused_flag], 0
     jne .zero_bass
 
-    ; Szam vege ellenorzese (status bgm mode -> "stopped")
     mov dword [mci_ret_buf], 0
     lea rcx, [mci_mode_cmd]
     lea rdx, [mci_ret_buf]
@@ -1561,12 +2753,14 @@ audio_update_bass:
     xor r9d, r9d
     call mciSendStringA
     test eax, eax
-    jnz .zero_bass
+    jnz .chk_fallback_bass
 
     cmp byte [mci_ret_buf], 's'
     jne .still_playing
+    cmp dword [dropped_flg], 0
+    jne .chk_fallback_bass
     call audio_next_track
-    jmp .zero_bass
+    jmp .done
 
 .still_playing:
     cmp dword [track_len_ms], 0
@@ -1581,12 +2775,16 @@ audio_update_bass:
     xor r9d, r9d
     call mciSendStringA
     test eax, eax
-    jnz .zero_bass
+    jnz .chk_fallback_bass
 
     lea rsi, [mci_ret_buf]
     call parse_uint_ascii
     mov [track_pos_ms], eax
 
+.chk_fallback_bass:
+    cmp dword [wasapi_ok], 0
+    jne .done
+    mov eax, [track_pos_ms]
     xor edx, edx
     mov ecx, 435
     div ecx
@@ -1599,19 +2797,34 @@ audio_update_bass:
     mulss xmm0, xmm0
     mulss xmm0, xmm0
     movss [bass_env], xmm0
-    jmp .bass_done
+
+    mov eax, [track_pos_ms]
+    add eax, 217
+    xor edx, edx
+    mov ecx, 435
+    div ecx
+    mov eax, 435
+    sub eax, edx
+    cvtsi2ss xmm0, eax
+    divss xmm0, xmm1
+    mulss xmm0, xmm0
+    mulss xmm0, xmm0
+    movss [high_env], xmm0
+    jmp .done
 
 .zero_bass:
     movss xmm0, [c_zero]
     movss [bass_env], xmm0
+    movss [high_env], xmm0
 
-.bass_done:
+.done:
     add rsp, 32
     pop rsi
     ret
 
 audio_close:
     sub rsp, 40
+    call synth_stop
     lea rcx, [mci_close_cmd]
     xor edx, edx
     xor r8d, r8d
@@ -1620,10 +2833,258 @@ audio_close:
     add rsp, 40
     ret
 
+; ============================================================================
+; Borderless Fullscreen Toggle ([F11] / [Alt+Enter])
+; ============================================================================
+toggle_fullscreen:
+    push rbx
+    sub rsp, 64
+
+    cmp dword [is_fullscr], 0
+    jne .restore_win
+
+    mov rcx, [hwnd]
+    lea rdx, [saved_rect]
+    call GetWindowRect
+
+    mov rcx, [hwnd]
+    mov edx, -16
+    call GetWindowLongPtrA
+    mov [saved_style], rax
+
+    mov rdx, rax
+    and rdx, ~0x00CF0000
+    mov rcx, [hwnd]
+    mov r8, rdx
+    mov edx, -16
+    call SetWindowLongPtrA
+
+    mov rcx, [hwnd]
+    mov edx, 2
+    call MonitorFromWindow
+
+    mov dword [mon_info], 40
+    mov rcx, rax
+    lea rdx, [mon_info]
+    call GetMonitorInfoA
+
+    mov ecx, [mon_info + 4]
+    mov ebx, [mon_info + 8]
+    mov r9d, [mon_info + 12]
+    sub r9d, ecx
+    mov eax, [mon_info + 16]
+    sub eax, ebx
+    mov [rsp + 32], r9d
+    mov [rsp + 40], eax
+    mov dword [rsp + 48], 0x0220
+    mov r8d, ecx
+    mov r9d, ebx
+    mov rcx, [hwnd]
+    xor edx, edx
+    call SetWindowPos
+
+    mov dword [is_fullscr], 1
+    jmp .done
+
+.restore_win:
+    mov rcx, [hwnd]
+    mov edx, -16
+    mov r8, [saved_style]
+    call SetWindowLongPtrA
+
+    mov ecx, [saved_rect]
+    mov ebx, [saved_rect + 4]
+    mov r9d, [saved_rect + 8]
+    sub r9d, ecx
+    mov eax, [saved_rect + 12]
+    sub eax, ebx
+
+    mov [rsp + 32], r9d
+    mov [rsp + 40], eax
+    mov dword [rsp + 48], 0x0224
+    mov r8d, ecx
+    mov r9d, ebx
+    mov rcx, [hwnd]
+    xor edx, edx
+    call SetWindowPos
+
+    mov dword [is_fullscr], 0
+
+.done:
+    add rsp, 64
+    pop rbx
+    ret
+
+; ============================================================================
+; Pixel-Perfect BMP Screenshot Capture ([F12])
+; ============================================================================
+capture_bmp_screenshot:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    sub rsp, 64
+
+    mov rcx, [hwnd]
+    lea rdx, [rect]
+    call GetClientRect
+    mov r12d, [rect + 8]
+    mov r13d, [rect + 12]
+    test r12d, r12d
+    jle .done
+    test r13d, r13d
+    jle .done
+
+    mov eax, r12d
+    imul eax, 3
+    add eax, 3
+    and eax, ~3
+    mov ebx, eax
+    imul eax, r13d
+    mov esi, eax
+    add eax, 54
+    mov edi, eax
+
+    xor ecx, ecx
+    mov edx, edi
+    mov r8d, 0x3000
+    mov r9d, 4
+    call VirtualAlloc
+    test rax, rax
+    jz .done
+    mov [rsp + 56], rax
+
+    mov rcx, rax
+    xor edx, edx
+.clr_hdr:
+    mov byte [rcx + rdx], 0
+    inc edx
+    cmp edx, 54
+    jl .clr_hdr
+
+    mov word [rax], 'BM'
+    mov [rax + 2], edi
+    mov dword [rax + 10], 54
+    mov dword [rax + 14], 40
+    mov [rax + 18], r12d
+    mov [rax + 22], r13d
+    mov word [rax + 26], 1
+    mov word [rax + 28], 24
+    mov [rax + 34], esi
+
+    mov ecx, 0x0D05
+    mov edx, 4
+    call glPixelStorei
+
+    mov rcx, [rsp + 56]
+    add rcx, 54
+    mov [rsp + 48], rcx
+    mov dword [rsp + 40], 0x1401
+    mov dword [rsp + 32], 0x1907
+    xor ecx, ecx
+    xor edx, edx
+    mov r8d, r12d
+    mov r9d, r13d
+    call glReadPixels
+
+    mov rsi, [rsp + 56]
+    add rsi, 54
+    xor edx, edx
+.row_loop:
+    cmp edx, r13d
+    jge .write_file
+    mov rcx, rsi
+    xor eax, eax
+.col_loop:
+    cmp eax, r12d
+    jge .next_row
+    mov r8b, [rcx]
+    mov r9b, [rcx + 2]
+    mov [rcx], r9b
+    mov [rcx + 2], r8b
+    add rcx, 3
+    inc eax
+    jmp .col_loop
+.next_row:
+    add rsi, rbx
+    inc edx
+    jmp .row_loop
+
+.write_file:
+    lea rdi, [shot_name]
+    mov dword [rdi], 'shot'
+    mov byte [rdi + 4], '_'
+    mov eax, [shot_idx]
+    inc dword [shot_idx]
+    mov ecx, 100
+    xor edx, edx
+    div ecx
+    add al, '0'
+    mov [rdi + 5], al
+    mov eax, edx
+    mov ecx, 10
+    xor edx, edx
+    div ecx
+    add al, '0'
+    mov [rdi + 6], al
+    add dl, '0'
+    mov [rdi + 7], dl
+    mov dword [rdi + 8], '.bmp'
+    mov byte [rdi + 12], 0
+
+    lea rcx, [shot_name]
+    mov edx, 0x40000000
+    xor r8d, r8d
+    xor r9d, r9d
+    mov dword [rsp + 32], 2
+    mov dword [rsp + 40], 0x80
+    mov qword [rsp + 48], 0
+    call CreateFileA
+    cmp rax, -1
+    je .free_mem
+    mov rbx, rax
+
+    mov rcx, rbx
+    mov rdx, [rsp + 56]
+    mov r8d, edi
+    lea r9, [rsp + 48]
+    mov qword [rsp + 32], 0
+    call WriteFile
+
+    mov rcx, rbx
+    call CloseHandle
+
+    mov eax, [c_pos1]
+    mov [flash_env], eax
+
+.free_mem:
+    mov rcx, [rsp + 56]
+    xor edx, edx
+    mov r8d, 0x8000
+    call VirtualFree
+
+.done:
+    add rsp, 64
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; ============================================================================
+; Entry Point & Main Loop
+; ============================================================================
 main:
 WinMain:
     sub rsp, 104
     finit
+
+    lea rcx, [qpc_freq]
+    call QueryPerformanceFrequency
+    lea rcx, [qpc_last]
+    call QueryPerformanceCounter
 
     xor ecx, ecx
     call GetModuleHandleA
@@ -1649,7 +3110,32 @@ WinMain:
     call CreateWindowExA
     mov [hwnd], rax
 
-    mov rcx, rax
+    lea rcx, [dll_shell32]
+    call LoadLibraryA
+    test rax, rax
+    jz .no_dnd
+    mov rbx, rax
+    mov rcx, rbx
+    lea rdx, [fn_DragAcceptFiles]
+    call GetProcAddress
+    mov [pDragAcceptFiles], rax
+    mov rcx, rbx
+    lea rdx, [fn_DragQueryFileA]
+    call GetProcAddress
+    mov [pDragQueryFileA], rax
+    mov rcx, rbx
+    lea rdx, [fn_DragFinish]
+    call GetProcAddress
+    mov [pDragFinish], rax
+
+    cmp qword [pDragAcceptFiles], 0
+    je .no_dnd
+    mov rcx, [hwnd]
+    mov edx, 1
+    call [pDragAcceptFiles]
+.no_dnd:
+
+    mov rcx, [hwnd]
     call GetDC
     mov [hdc], rax
 
@@ -1810,6 +3296,21 @@ WinMain:
     mov [u_player_loc], eax
 
     mov ecx, r13d
+    lea rdx, [u_fx_name]
+    call [glGetUniformLocation]
+    mov [u_fx_loc], eax
+
+    mov ecx, r13d
+    lea rdx, [u_demo_name]
+    call [glGetUniformLocation]
+    mov [u_demo_loc], eax
+
+    mov ecx, r13d
+    lea rdx, [u_bands_name]
+    call [glGetUniformLocation]
+    mov [u_bands_loc], eax
+
+    mov ecx, r13d
     lea rdx, [u_scroll_name]
     call [glGetUniformLocation]
     mov [u_scroll_loc], eax
@@ -1829,7 +3330,9 @@ WinMain:
     call [glGetUniformLocation]
     mov [u_top_len_loc], eax
 
-    call audio_init
+    call wasapi_init
+    call playlist_scan
+    call audio_play_current
 
 msg_loop:
     lea rcx, [msg]
@@ -1851,12 +3354,61 @@ msg_loop:
     jmp msg_loop
 
 render_frame:
-    fld dword [time]
-    fadd dword [dt_step]
-    fstp dword [time]
+    lea rcx, [qpc_now]
+    call QueryPerformanceCounter
+    mov rax, [qpc_now]
+    sub rax, [qpc_last]
+    mov rdx, [qpc_now]
+    mov [qpc_last], rdx
+
+    cvtsi2ss xmm0, rax
+    cvtsi2ss xmm1, qword [qpc_freq]
+    divss xmm0, xmm1
+    minss xmm0, [c_max_dt]
+    movss [dt_step], xmm0
+
+    inc dword [fps_frames]
+    addss xmm0, [fps_accum]
+    movss [fps_accum], xmm0
+    comiss xmm0, [c_fps_iv]
+    jb .fps_ok
+    cvtsi2ss xmm1, dword [fps_frames]
+    divss xmm1, xmm0
+    movss [fps_val_f], xmm1
+    mov dword [fps_frames], 0
+    mov dword [fps_accum], 0
+.fps_ok:
+
+    movss xmm0, [time]
+    addss xmm0, [dt_step]
+    movss [time], xmm0
+
+    movss xmm1, [flash_env]
+    movss xmm2, [dt_step]
+    mulss xmm2, [c_flash_dec]
+    subss xmm1, xmm2
+    maxss xmm1, [c_zero]
+    movss [flash_env], xmm1
 
     call audio_set_volume
-    call audio_update_bass
+    call audio_update
+
+    mov eax, [morph_mode]
+    test eax, eax
+    jnz .locked_morph
+    movss [rsp], xmm0
+    fld dword [rsp]
+    fmul dword [.morph_spd]
+    fsin
+    fadd dword [c_pos1]
+    fmul dword [c_two_f]
+    fstp dword [morph_val]
+    jmp .morph_done
+.locked_morph:
+    dec eax
+    cvtsi2ss xmm1, eax
+    movss [morph_val], xmm1
+.morph_done:
 
     fld dword [slider0]
     fmul dword [max_rot_spd]
@@ -1894,6 +3446,10 @@ render_frame:
     cvtsi2ss xmm0, eax
     movss [muted_f], xmm0
 
+    mov eax, [holo_mode]
+    cvtsi2ss xmm0, eax
+    movss [holo_mode_f], xmm0
+
     mov rcx, [hwnd]
     lea rdx, [rect]
     call GetClientRect
@@ -1921,6 +3477,11 @@ render_frame:
     movss xmm2, [mag_phase]
     call [glUniform2f]
 
+    mov ecx, [u_bands_loc]
+    mov edx, 8
+    lea r8, [u_bands]
+    call [glUniform4fv]
+
     sub rsp, 48
     mov ecx, [u_sliders_loc]
     movss xmm1, [slider0]
@@ -1945,6 +3506,22 @@ render_frame:
     mov eax, [vol_level]
     mov [rsp + 32], eax
     call [glUniform4f]
+
+    mov ecx, [u_fx_loc]
+    movss xmm1, [morph_val]
+    movss xmm2, [grid_on]
+    movss xmm3, [fps_val_f]
+    mov eax, [flash_env]
+    mov [rsp + 32], eax
+    call [glUniform4f]
+
+    mov ecx, [u_demo_loc]
+    movss xmm1, [copper_on]
+    movss xmm2, [holo_mode_f]
+    movss xmm3, [glitch_on]
+    mov eax, [high_env]
+    mov [rsp + 32], eax
+    call [glUniform4f]
     add rsp, 48
 
     movss xmm0, [c_neg1]
@@ -1957,6 +3534,8 @@ render_frame:
     call SwapBuffers
 
     jmp msg_loop
+    align 4
+.morph_spd   dd 0.22
 
 exit_app:
     call audio_close
@@ -1966,21 +3545,20 @@ exit_app:
     xor ecx, ecx
     call ExitProcess
 
-; ----------------------------------------------------------------------------
-; Eger segedfuggvenyek: seek bar & volume bar
-; ----------------------------------------------------------------------------
-; ebx = mouseX, r8d = clientW
+; ============================================================================
+; Mouse & Window Message Handler
+; ============================================================================
 apply_seek_mouse:
     sub rsp, 40
     mov ecx, r8d
-    sub ecx, 430            ; seekX0
+    sub ecx, 430
     mov eax, ebx
     sub eax, ecx
     test eax, eax
     jns .min_ok
     xor eax, eax
 .min_ok:
-    cmp eax, 254            ; seekX1 - seekX0 = 254
+    cmp eax, 254
     jle .max_ok
     mov eax, 254
 .max_ok:
@@ -1992,17 +3570,16 @@ apply_seek_mouse:
     add rsp, 40
     ret
 
-; ebx = mouseX, r8d = clientW
 apply_vol_mouse:
     mov ecx, r8d
-    sub ecx, 138            ; volX0
+    sub ecx, 138
     mov eax, ebx
     sub eax, ecx
     test eax, eax
     jns .min_ok
     xor eax, eax
 .min_ok:
-    cmp eax, 114            ; volX1 - volX0 = 114
+    cmp eax, 114
     jle .max_ok
     mov eax, 114
 .max_ok:
@@ -2019,6 +3596,10 @@ WndProc:
     je .destroy
     cmp edx, 0x0100
     je .keydown
+    cmp edx, 0x0104
+    je .syskeydown
+    cmp edx, 0x0233
+    je .dropfiles
     cmp edx, 0x0201
     je .lbuttondown
     cmp edx, 0x0202
@@ -2027,13 +3608,69 @@ WndProc:
     je .mousemove
     jmp DefWindowProcA
 
+.syskeydown:
+    cmp r8d, 0x0D
+    jne DefWindowProcA
+    sub rsp, 40
+    call toggle_fullscreen
+    add rsp, 40
+    jmp .ret_zero
+
+.dropfiles:
+    sub rsp, 40
+    cmp qword [pDragQueryFileA], 0
+    je .drop_done
+    mov rbx, r8
+    mov rcx, rbx
+    xor edx, edx
+    lea r8, [dropped_path]
+    mov r9d, 258
+    call [pDragQueryFileA]
+    mov rcx, rbx
+    call [pDragFinish]
+
+    mov dword [dropped_flg], 1
+    mov dword [synth_mode], 0
+    call audio_play_current
+.drop_done:
+    add rsp, 40
+    jmp .ret_zero
+
 .keydown:
     cmp r8d, 0x1B
     je .destroy
+    cmp r8d, 0x7A
+    je .do_fullscreen
+    cmp r8d, 0x7B
+    je .do_screenshot
     cmp r8d, 'H'
     je .toggle_hud
     cmp r8d, 'M'
     je .toggle_mute
+    cmp r8d, 'G'
+    je .toggle_grid
+    cmp r8d, 'C'
+    je .toggle_copper
+    cmp r8d, 'W'
+    je .cycle_mat
+    cmp r8d, 'X'
+    je .toggle_glitch
+    cmp r8d, 'S'
+    je .toggle_synth
+    cmp r8d, 'A'
+    je .set_auto_morph
+    cmp r8d, '0'
+    je .set_auto_morph
+    cmp r8d, '1'
+    je .set_shape_1
+    cmp r8d, '2'
+    je .set_shape_2
+    cmp r8d, '3'
+    je .set_shape_3
+    cmp r8d, '4'
+    je .set_shape_4
+    cmp r8d, '5'
+    je .set_shape_5
     cmp r8d, 'N'
     je .next_track
     cmp r8d, 0x27
@@ -2045,6 +3682,88 @@ WndProc:
     cmp r8d, 0x20
     je .pause_track
     jmp DefWindowProcA
+
+.do_fullscreen:
+    sub rsp, 40
+    call toggle_fullscreen
+    add rsp, 40
+    jmp .ret_zero
+
+.do_screenshot:
+    sub rsp, 40
+    call capture_bmp_screenshot
+    add rsp, 40
+    jmp .ret_zero
+
+.toggle_grid:
+    movss xmm0, [grid_on]
+    ucomiss xmm0, [c_zero]
+    ja .hide_grid
+    mov eax, [c_pos1]
+    mov [grid_on], eax
+    jmp .ret_zero
+.hide_grid:
+    mov dword [grid_on], 0
+    jmp .ret_zero
+
+.toggle_copper:
+    movss xmm0, [copper_on]
+    ucomiss xmm0, [c_zero]
+    ja .hide_copper
+    mov eax, [c_pos1]
+    mov [copper_on], eax
+    jmp .ret_zero
+.hide_copper:
+    mov dword [copper_on], 0
+    jmp .ret_zero
+
+.cycle_mat:
+    mov eax, [holo_mode]
+    inc eax
+    cmp eax, 3
+    jl .store_mat
+    xor eax, eax
+.store_mat:
+    mov [holo_mode], eax
+    jmp .ret_zero
+
+.toggle_glitch:
+    movss xmm0, [glitch_on]
+    ucomiss xmm0, [c_zero]
+    ja .hide_glitch
+    mov eax, [c_pos1]
+    mov [glitch_on], eax
+    jmp .ret_zero
+.hide_glitch:
+    mov dword [glitch_on], 0
+    jmp .ret_zero
+
+.toggle_synth:
+    sub rsp, 40
+    xor dword [synth_mode], 1
+    mov dword [dropped_flg], 0
+    call audio_play_current
+    add rsp, 40
+    jmp .ret_zero
+
+.set_auto_morph:
+    mov dword [morph_mode], 0
+    jmp .ret_zero
+.set_shape_1:
+    mov dword [morph_mode], 1
+    jmp .ret_zero
+.set_shape_2:
+    mov dword [morph_mode], 2
+    jmp .ret_zero
+.set_shape_3:
+    mov dword [morph_mode], 3
+    jmp .ret_zero
+.set_shape_4:
+    mov dword [morph_mode], 4
+    jmp .ret_zero
+.set_shape_5:
+    mov dword [morph_mode], 5
+    jmp .ret_zero
 
 .next_track:
     sub rsp, 40
@@ -2094,22 +3813,20 @@ WndProc:
     push rsi
     sub rsp, 40
 
-    movsx ebx, r9w          ; mouseX
+    movsx ebx, r9w
     mov esi, r9d
-    sar esi, 16             ; mouseY
+    sar esi, 16
 
     mov rcx, [hwnd]
     lea rdx, [rect]
     call GetClientRect
-    mov r8d, [rect + 8]     ; clientW
+    mov r8d, [rect + 8]
 
-    ; Felso player sav (py: 10..36)
     cmp esi, 10
     jl .chk_hud_sliders
     cmp esi, 36
     jg .chk_hud_sliders
 
-    ; 1. Prev gomb (20..64)
     cmp ebx, 20
     jl .chk_hud_sliders
     cmp ebx, 64
@@ -2118,7 +3835,6 @@ WndProc:
     jmp .lbtn_done
 
 .chk_btn_play:
-    ; 2. Play/Pause gomb (70..114)
     cmp ebx, 70
     jl .chk_hud_sliders
     cmp ebx, 114
@@ -2127,7 +3843,6 @@ WndProc:
     jmp .lbtn_done
 
 .chk_btn_next:
-    ; 3. Next gomb (120..164)
     cmp ebx, 120
     jl .chk_hud_sliders
     cmp ebx, 164
@@ -2136,7 +3851,6 @@ WndProc:
     jmp .lbtn_done
 
 .chk_seek_bar:
-    ; 4. Gyorstekero-bar (W-434 .. W-172)
     mov eax, r8d
     sub eax, 434
     cmp ebx, eax
@@ -2150,7 +3864,6 @@ WndProc:
     jmp .lbtn_done
 
 .chk_spk_icon:
-    ; 5. Hangszoro mute ikon (W-162 .. W-141)
     mov eax, r8d
     sub eax, 162
     cmp ebx, eax
@@ -2173,7 +3886,6 @@ WndProc:
     jmp .lbtn_done
 
 .chk_vol_bar:
-    ; 6. Hangero csuszka (W-142 .. W-20)
     mov eax, r8d
     sub eax, 142
     cmp ebx, eax
@@ -2237,13 +3949,13 @@ WndProc:
     push rsi
     sub rsp, 40
 
-    movsx ebx, r9w          ; mouseX
+    movsx ebx, r9w
     mov esi, [drag_mode]
 
     mov rcx, [hwnd]
     lea rdx, [rect]
     call GetClientRect
-    mov r8d, [rect + 8]     ; clientW
+    mov r8d, [rect + 8]
 
     cmp esi, 2
     jne .mm_chk_vol
